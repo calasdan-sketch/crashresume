@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Conformance harness that proves an agent survives crash/restart without losing state or replaying effects"
 readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
 authors = [{ name = "calasdan-sketch" }]
 keywords = ["agents", "conformance", "crash", "resume", "idempotency", "pytest", "recovery"]
 classifiers = [

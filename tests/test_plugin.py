@@ -45,5 +45,10 @@ def test_conform_fixture_fails_on_replay(conform):
 
 def test_plugin_fixture_registered_and_asserting(tmp_path, pytester):
     pytester.makepyfile(PLUGIN)
-    result = pytester.runpytest("-p", "crashresume.pytest_plugin")
+    # Expose the shipped fixture via conftest instead of -p: when the package is
+    # pip-installed (CI), its pytest11 entry point already registers the plugin,
+    # and an explicit -p load makes pluggy reject the double registration.
+    # The conftest import works in both installed and PYTHONPATH-only runs.
+    pytester.makeconftest("from crashresume.pytest_plugin import conform  # noqa: F401")
+    result = pytester.runpytest()
     assert result.ret == 0
