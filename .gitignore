@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
+*.whl
+*.tar.gz
+.pytest_cache/
+.venv-sop/
+.ruff_cache/
+dist/

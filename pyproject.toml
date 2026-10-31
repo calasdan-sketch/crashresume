@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crashresume"
+version = "0.1.1"
+description = "Conformance harness that proves an agent survives crash/restart without losing state or replaying effects"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "calasdan-sketch" }]
+keywords = ["agents", "conformance", "crash", "resume", "idempotency", "pytest", "recovery"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Framework :: Pytest",
+    "Operating System :: OS Independent",
+    "Typing :: Typed",
+    "Topic :: Software Development :: Testing",
+]
+
+[project.scripts]
+crashresume = "crashresume.cli:main"
+
+[project.entry-points.pytest11]
+crashresume = "crashresume.pytest_plugin"
+
+[project.urls]
+Homepage = "https://github.com/calasdan-sketch/crashresume"
+Issues = "https://github.com/calasdan-sketch/crashresume/issues"
+
+[tool.setuptools.package-data]
+crashresume = ["py.typed"]
+
+[tool.ruff]
+line-length = 130
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
