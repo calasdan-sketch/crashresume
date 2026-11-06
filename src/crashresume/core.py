@@ -3,11 +3,13 @@ side-effect boundary, and check the invariants that matter:
 
 * ``state_lost``       - after restart, the subject's state is empty/gone while
                          the baseline run had state
-* ``effect_replayed``  - the same idempotency key was issued twice, or more often
-                         than in the baseline
-* ``effect_lost``      - a keyed effect from the baseline never happened
-* ``effect_diverged``  - an effect was re-issued under a baseline key but with a
-                         different payload (idempotent APIs reject or mis-apply this)
+* ``effect_replayed``  - an idempotency key was issued more often than in the
+                         baseline (a baseline that itself repeats a key gets a warning)
+* ``effect_lost``      - a keyed effect from the baseline was issued fewer times
+                         than in the baseline (usually: never)
+* ``effect_diverged``  - after a crash, an effect was issued under a baseline key
+                         with a different kind or payload (idempotent APIs reject or
+                         mis-apply this); opt in with ``check_payloads=True``
 * ``resume_diverged``  - the resumed run finished in a different state than the
                          baseline run
 * ``resume_crashed``   - the resume itself hit an injected crash it was not given
@@ -19,11 +21,14 @@ The subject is any object with a ``step(input)`` method. The harness owns the
 side-effect channel: subjects record effects through ``ctx.effect(...)``, which
 is where crashes get injected. Persistence across restart is the subject's job -
 the factory is called again to model a fresh process. ``ctx.store`` is a
-harness-owned dict that is durable within one scenario and fresh for the next.
+harness-owned dict that is durable within one scenario and fresh for the next;
+each new process life gets a deep copy, so live objects cannot survive a crash.
 """
 from __future__ import annotations
 
+import copy
 import json
+import re
 import reprlib
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
@@ -53,6 +58,29 @@ def _sig(value: Any) -> str:
         return repr(value)
     except Exception:
         return f"<unrepresentable {type(value).__name__}>"  # no id(): avoid false "diverged"
+
+
+_ADDR = re.compile(r" at 0x[0-9a-fA-F]+")
+
+
+def _norm_sig(value: Any) -> str:
+    """Repr signature with memory addresses removed (``<P object at 0x..>``)."""
+    return _ADDR.sub("", _sig(value))
+
+
+def _same_payload(a: Any, b: Any) -> bool:
+    """``==`` first (dict order, custom ``__eq__``); repr only as a fallback for
+    types without their own equality or whose ``==`` raises or is not a bool."""
+    try:
+        eq = a == b
+        if isinstance(eq, bool):
+            if eq:
+                return True
+            if type(a).__eq__ is not object.__eq__:
+                return False          # the type defines equality: trust it
+    except Exception:
+        pass
+    return _norm_sig(a) == _norm_sig(b)
 
 
 class InjectedCrash(BaseException):
@@ -115,7 +143,8 @@ class Context:
         self._crash_at = crash_at
         self._crash_when = crash_when
         self._count = 0
-        self.crashed = False   # True once a crash was injected in this process life
+        self.crashed = False    # True once a crash was injected in this process life
+        self.swallowed = False  # True if the subject kept running after a crash
 
     def effect(self, kind: str, payload: Any = None, key: Optional[str] = None) -> Effect:
         """Record a side effect.
@@ -124,9 +153,16 @@ class Context:
         side effect committed, process died before the checkpoint. In ``before``
         mode the process dies just before the effect is committed.
         """
+        if key is not None:
+            try:
+                hash(key)
+            except TypeError:
+                raise TypeError(f"ctx.effect key must be hashable (use a str), got {type(key).__name__}") from None
         self._count += 1
         armed = self._crash_at is not None and self._count >= self._crash_at
         if armed:
+            if self.crashed:
+                self.swallowed = True   # already "dead" once: the first crash was caught
             self.crashed = True
         if armed and self._crash_when == BEFORE:
             raise InjectedCrash(f"crash injected before effect #{self._count} ({kind})")
@@ -207,13 +243,10 @@ def _is_empty(value: Any, _depth: int = 0) -> bool:
 
 
 def _equal(a: Any, b: Any) -> bool:
-    """State equality that survives self-referential containers and ``__eq__``
-    implementations that raise or return non-bools (e.g. arrays): falls back to
-    comparing reprs."""
-    try:
-        return bool(a == b)
-    except (RecursionError, Exception):
-        return _sig(a) == _sig(b)
+    """State equality that survives self-referential containers, ``__eq__`` that
+    raises or returns non-bools (e.g. arrays), and objects with no ``__eq__``
+    (compared by address-free repr)."""
+    return _same_payload(a, b)
 
 
 def _snapshot(agent: Any) -> Any:
@@ -246,12 +279,29 @@ class _Outcome:
     log: EffectLog
     final_state: Any = None
     last_life_effects: int = 0
+    first_life_effects: int = 0
     error: Optional[Finding] = None
     unreached: Optional[str] = None
 
 
+def _survive(store: Dict[str, Any], isolate: bool) -> Dict[str, Any]:
+    """What durable storage hands the next process life."""
+    if not isolate:
+        return store
+    try:
+        return copy.deepcopy(store)
+    except Exception as exc:
+        raise TypeError(
+            "ctx.store holds an object that cannot outlive a process "
+            f"({type(exc).__name__}: {exc}); store plain data, or pass isolate_store=False"
+        ) from exc
+
+
+_SWALLOWED = "caught InjectedCrash and kept running; a real crash cannot be caught"
+
+
 def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
-          crashes: Sequence[Crash]) -> _Outcome:
+          crashes: Sequence[Crash], isolate: bool = True) -> _Outcome:
     """Run one scenario: crash once per entry in ``crashes``, then resume clean."""
     sid = _scenario_id(run_id, crashes)
     first = crashes[0][0]
@@ -259,24 +309,33 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
     store: Dict[str, Any] = {}
     out = _Outcome(log=log)
     for life, (k, when) in enumerate(crashes, 1):
+        if life > 1:
+            store = _survive(store, isolate)
         ctx = Context(sid, log, crash_at=k, store=store, crash_when=when)
         try:
             _run(factory, inputs, ctx)
         except InjectedCrash:
+            if life == 1:
+                out.first_life_effects = len(log)
+            if ctx.swallowed:
+                out.error = Finding("crash_swallowed", first, f"process life {life} {_SWALLOWED}", sid)
+                return out
             continue
         except Exception as exc:  # noqa: BLE001 - reported, not hidden
             out.error = Finding("subject_error", first, f"process life {life} raised {type(exc).__name__}: {_r(exc)}", sid)
             return out
         if ctx.crashed:
-            out.error = Finding("crash_swallowed", first,
-                                f"process life {life} caught InjectedCrash and kept running; a real crash cannot be caught", sid)
+            out.error = Finding("crash_swallowed", first, f"process life {life} {_SWALLOWED}", sid)
             return out
         out.unreached = (
             f"{sid}: crash {when} effect #{k} never reached in process life {life} "
             "(subject issued fewer effects than the baseline - nondeterministic?); resumed without it"
         )
+        if life == 1:
+            out.first_life_effects = len(log)
         break
     before = len(log)
+    store = _survive(store, isolate)
     try:
         agent = _run(factory, inputs, Context(sid, log, store=store))
         out.final_state = _snapshot(agent)
@@ -289,7 +348,8 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
 
 
 def _check(report: ConformanceReport, sid: str, first: int, out: _Outcome,
-           base_effects: List[Effect], base_state: Any) -> None:
+           base_effects: List[Effect], base_state: Any,
+           check_payloads: bool = True, payload_key: Optional[Callable[[Any], Any]] = None) -> None:
     final_effects = out.log.effects
     base_keys = Counter(e.key for e in base_effects if e.key is not None)
     final_keys = Counter(e.key for e in final_effects if e.key is not None)
@@ -301,25 +361,29 @@ def _check(report: ConformanceReport, sid: str, first: int, out: _Outcome,
         elif n > base_keys.get(key, 0):
             report.findings.append(Finding("effect_replayed", first, f"key {_r(key)} appears more often than in baseline", sid))
 
-    # 1b. same key, different payload (baseline key issued exactly once there)
-    base_payload = {}
-    for e in base_effects:
-        if e.key is not None and base_keys[e.key] == 1:
-            base_payload[e.key] = (e.kind, _sig(e.payload))
-    reported = set()
-    for e in final_effects:
-        want = base_payload.get(e.key) if e.key is not None else None
-        if want is not None and (e.kind, _sig(e.payload)) != want and e.key not in reported:
-            reported.add(e.key)
-            report.findings.append(Finding(
-                "effect_diverged", first,
-                f"key {_r(e.key)} re-issued as {e.kind!r} {_r(e.payload)}; baseline was {want[0]!r} with a different payload",
-                sid,
-            ))
+    # 1b. same key, different payload - only for effects issued AFTER the first
+    #     crash (the first life is just a prefix of the baseline), and only for
+    #     keys the baseline issued exactly once.
+    if check_payloads:
+        norm = payload_key or (lambda p: p)
+        base_payload = {e.key: (e.kind, norm(e.payload)) for e in base_effects
+                        if e.key is not None and base_keys[e.key] == 1}
+        reported = set()
+        for e in final_effects[out.first_life_effects:]:
+            want = base_payload.get(e.key) if e.key is not None else None
+            if want is None or e.key in reported:
+                continue
+            if e.kind != want[0] or not _same_payload(norm(e.payload), want[1]):
+                reported.add(e.key)
+                report.findings.append(Finding(
+                    "effect_diverged", first,
+                    f"key {_r(e.key)} re-issued as {e.kind!r} {_r(e.payload)}; baseline was {want[0]!r} {_r(want[1])}",
+                    sid,
+                ))
 
     # 2. keyless effects: compare (kind, payload) counts against baseline (warning only)
-    base_sig = Counter((e.kind, _sig(e.payload)) for e in base_effects if e.key is None)
-    final_sig = Counter((e.kind, _sig(e.payload)) for e in final_effects if e.key is None)
+    base_sig = Counter((e.kind, _norm_sig(e.payload)) for e in base_effects if e.key is None)
+    final_sig = Counter((e.kind, _norm_sig(e.payload)) for e in final_effects if e.key is None)
     for sig, n in sorted(final_sig.items()):
         if n > base_sig.get(sig, 0):
             msg = (
@@ -329,9 +393,13 @@ def _check(report: ConformanceReport, sid: str, first: int, out: _Outcome,
             if msg not in report.warnings:
                 report.warnings.append(msg)
 
-    # 3. keyed effects that vanished
-    for key in sorted(set(base_keys) - set(final_keys), key=_sig):
-        report.findings.append(Finding("effect_lost", first, f"key {_r(key)} never issued after resume", sid))
+    # 3. keyed effects that vanished, or were issued fewer times than in the baseline
+    for key in sorted(base_keys, key=_sig):
+        n, want = final_keys.get(key, 0), base_keys[key]
+        if n == 0:
+            report.findings.append(Finding("effect_lost", first, f"key {_r(key)} never issued after resume", sid))
+        elif n < want:
+            report.findings.append(Finding("effect_lost", first, f"key {_r(key)} issued {n} time(s), baseline {want}", sid))
 
     # 4. state invariants (only when the subject exposes comparable state).
     #    A subject that reconciles against the committed effect log may start
@@ -358,6 +426,9 @@ def conform(
     crash_before: bool = False,
     max_crashes: int = 1,
     max_scenarios: Optional[int] = 10_000,
+    check_payloads: Optional[bool] = None,
+    payload_key: Optional[Callable[[Any], Any]] = None,
+    isolate_store: bool = True,
 ) -> ConformanceReport:
     """Run ``factory(ctx) -> subject`` to completion, then re-run it crashing at
     every effect boundary and compare against the baseline.
@@ -367,7 +438,15 @@ def conform(
     * ``max_crashes`` - crash up to this many times per scenario; 2 also crashes
       the resume at each of its own effect boundaries (crash-during-recovery).
     * ``max_scenarios`` - safety cap on scenarios executed; ``None`` for no cap.
-      Hitting it adds a warning, so a truncated run is never silent.
+      Hitting it adds a warning, so a truncated run is never silent. Pending
+      scenarios are bounded by the cap too, so memory stays O(max_scenarios).
+    * ``check_payloads`` / ``payload_key`` - opt in to ``effect_diverged``: compare
+      the payload of each keyed effect issued after a crash with the baseline's.
+      Off by default (request ids and timestamps legitimately differ). Passing
+      ``payload_key=lambda p: p["amount"]`` turns it on and compares only that.
+    * ``isolate_store`` - give each new process life a deep copy of ``ctx.store``
+      so live objects (iterators, locks, the old agent) cannot survive a crash.
+      ``False`` shares one live dict between lives (faster, less realistic).
 
     Each scenario is independent: the factory is called again from scratch and
     ``ctx.store`` starts empty. Key any other durable state by ``ctx.run_id``.
@@ -376,6 +455,8 @@ def conform(
         raise ValueError("max_crashes must be an int >= 1")
     if max_scenarios is not None and (not isinstance(max_scenarios, int) or max_scenarios < 1):
         raise ValueError("max_scenarios must be a positive int or None")
+    if check_payloads is None:
+        check_payloads = payload_key is not None
     inputs = list(inputs)
     modes = (AFTER, BEFORE) if crash_before else (AFTER,)
 
@@ -388,10 +469,17 @@ def conform(
     if not base_effects:
         report.warnings.append("subject recorded no effects through ctx.effect(); nothing was tested")
         return report
+    for key, n in Counter(e.key for e in base_effects if e.key is not None).items():
+        if n > 1:
+            report.warnings.append(
+                f"baseline issued key {_r(key)} {n} times with no crash at all - a double effect? "
+                f"(treated as the expected count)"
+            )
 
     # breadth-first: all single crashes first, so a cap trims the deepest scenarios
     queue: List[Tuple[Crash, ...]] = [((k, when),) for when in modes for k in range(1, len(base_effects) + 1)]
     truncated = False
+    dropped = 0   # children never enqueued because of the cap
     i = 0
     while i < len(queue):
         if max_scenarios is not None and report.crash_points >= max_scenarios:
@@ -400,7 +488,7 @@ def conform(
         crashes = queue[i]
         i += 1
         sid = _scenario_id(run_id, crashes)
-        out = _play(factory, inputs, run_id, crashes)
+        out = _play(factory, inputs, run_id, crashes, isolate_store)
         if out.unreached and out.unreached not in report.warnings:
             report.warnings.append(out.unreached)
         report.crash_points += 1
@@ -408,15 +496,18 @@ def conform(
             report.findings.append(replace(out.error, when=crashes[0][1]))
             continue
         start = len(report.findings)
-        _check(report, sid, crashes[0][0], out, base_effects, base_state)
+        _check(report, sid, crashes[0][0], out, base_effects, base_state, check_payloads, payload_key)
         if crashes[0][1] != AFTER:
             report.findings[start:] = [replace(f, when=crashes[0][1]) for f in report.findings[start:]]
         if len(crashes) < max_crashes and not out.unreached:
             for when in modes:
                 for j in range(1, out.last_life_effects + 1):
-                    queue.append(crashes + ((j, when),))
-    if truncated:
+                    if max_scenarios is not None and len(queue) >= max_scenarios:
+                        dropped += 1
+                    else:
+                        queue.append(crashes + ((j, when),))
+    if truncated or dropped:
         report.warnings.append(
-            f"stopped at max_scenarios={max_scenarios}; at least {len(queue) - i} more scenario(s) were not run"
+            f"stopped at max_scenarios={max_scenarios}; at least {len(queue) - i + dropped} more scenario(s) were not run"
         )
     return report

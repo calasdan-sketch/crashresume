@@ -8,7 +8,7 @@ No server, no database, no framework: the subject is any object with a `step(inp
 
 ```bash
 pip install crashresume
-crashresume --selftest      # see it catch five kinds of broken agent
+crashresume --selftest      # one correct agent passes, four broken ones are caught
 ```
 
 ```python
@@ -40,6 +40,7 @@ When it fails you get the scenario and the reason (output from the built-in `Eag
 conformance: 6 crash point(s) tested, 3 finding(s)
   [effect_lost] crash before effect #1 (run-b1): key 'process:a' never issued after resume
   [effect_lost] crash before effect #2 (run-b2): key 'process:b' never issued after resume
+  [effect_lost] crash before effect #3 (run-b3): key 'process:c' never issued after resume
 ```
 
 ## What it checks
@@ -47,15 +48,15 @@ conformance: 6 crash point(s) tested, 3 finding(s)
 | Finding | Meaning |
 |---|---|
 | `effect_replayed` | an idempotency key fired more often than in the baseline (e.g. a double charge) |
-| `effect_lost` | a keyed effect from the baseline never happened after resume |
-| `effect_diverged` | a key was re-issued with a different payload (idempotent APIs reject or mis-apply this) |
+| `effect_lost` | a keyed effect from the baseline happened fewer times after resume (usually never) |
+| `effect_diverged` | opt-in (`check_payloads=True` or `payload_key=`): after a crash, a key was issued with a different payload than in the baseline |
 | `state_lost` | final state is empty while the baseline had state |
 | `resume_diverged` | final state is non-empty but differs from the baseline |
 | `resume_crashed` | the clean resume hit an injected crash again |
 | `subject_error` | the subject raised an ordinary exception after a crash (reported, not raised) |
-| `crash_swallowed` | the subject caught the injected crash (`except BaseException`) and kept going |
+| `crash_swallowed` | the subject caught the injected crash (`except BaseException`) and kept going, even if it died again later |
 
-Warnings (not failures) flag runs with no effects, keyless effects that repeated, injected crashes that were never reached, and a hit `max_scenarios` cap - a truncated or untested run is never reported as a silent pass.
+Warnings (not failures) flag runs with no effects, a baseline that itself issues a key more than once, keyless effects that repeated, injected crashes that were never reached, and a hit `max_scenarios` cap - a truncated or untested run is never reported as a silent pass.
 
 ## Crash modes
 
@@ -79,9 +80,11 @@ def test_agent_is_crash_safe(conform):
 
 CI artifacts: `report.to_json(indent=2)` (or `to_dict()`).
 
+Payload checks: `effect_diverged` is off by default because request ids and timestamps legitimately differ between runs. Turn it on with `check_payloads=True`, or compare only what matters with `payload_key=lambda p: (p["account"], p["amount"])`. Payloads are compared with `==` first (dict key order does not matter); repr is used only for types without their own equality, with memory addresses removed.
+
 ## Your own persistence
 
-`ctx.store` is the zero-setup option. If your agent uses a real database, reset it per scenario by keying on `ctx.run_id`:
+`ctx.store` is the zero-setup option. Each new process life gets a `copy.deepcopy` of it, so plain data survives a crash but live objects (the old agent, open connections) do not; objects that cannot be copied (locks, generators, sockets) raise a clear `TypeError`. `isolate_store=False` shares one live dict instead. If your agent uses a real database, reset it per scenario by keying on `ctx.run_id`:
 
 ```python
 stores = {}
@@ -90,7 +93,7 @@ def make_agent(ctx):
     return MyAgent(ctx, store=stores.setdefault(ctx.run_id, Store()))
 ```
 
-Route real side effects through `ctx.effect(kind, payload, key=...)` - that is where crashes are injected and replays counted. `ctx.effects` is the durable log of what already happened, for reconciliation.
+Route real side effects through `ctx.effect(kind, payload, key=...)` (keys must be hashable; strings recommended, and `""` counts as a real key) - that is where crashes are injected and replays counted. `ctx.effects` is the durable log of what already happened, for reconciliation.
 
 ## How it compares
 
@@ -109,10 +112,11 @@ Why it matters: crashes between a side effect and its record repeat the effect -
 
 ## Honest limits
 
-- **Simulated crashes, same process.** `InjectedCrash` (a `BaseException`) models process death; it does not `SIGKILL` a real process, drop network connections, or lose un-fsynced writes. `ctx.store` writes are durable immediately (no partial-write modelling).
+- **Simulated crashes, same process.** `InjectedCrash` (a `BaseException`) models process death; it does not `SIGKILL` a real process, drop network connections, or lose un-fsynced writes. `ctx.store` writes are durable immediately (no partial-write modelling), and anything `copy.deepcopy` can copy (including list iterators) survives.
+- A subject that converts the injected crash into another exception (`except BaseException: raise X`) is reported as `subject_error`, not `crash_swallowed`.
 - **Only what goes through `ctx.effect` is observed.** Subjects that record no effects pass trivially (with a warning). Effects without `key=` cannot be checked for replay (warning only).
 - **Deterministic subjects work best.** Crash points come from the baseline run; a subject that issues different effects each run gets "never reached" warnings.
-- **Cost grows with depth.** `max_crashes=2` runs roughly N + N^2 scenarios for N effects, each replaying all inputs. Use `max_scenarios` to cap it.
+- **Cost grows with depth.** For N effects and an agent that resumes where it left off, the default runs N scenarios; `max_crashes=2` runs N + N(N+1)/2 (65 for N=10); `crash_before=True` roughly quadruples that (240 for N=10); `max_crashes=3` gives 285, or 2000 with `crash_before`. Each scenario replays all inputs. `max_scenarios` (default 10,000) caps both runtime and the pending-scenario queue.
 - Synchronous `step()` only; async agents need a sync wrapper for now.
 
 ## License
