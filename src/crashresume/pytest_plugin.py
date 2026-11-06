@@ -14,10 +14,11 @@ def conform():
 
         def test_agent_is_conformant(conform, make_agent):
             conform(lambda ctx: make_agent(ctx), inputs=["a", "b", "c"])
+            conform(make_agent, inputs, crash_before=True, max_crashes=2)
     """
 
-    def run(factory, inputs, run_id: str = "run") -> core.ConformanceReport:
-        report = core.conform(factory, inputs, run_id=run_id)
+    def run(factory, inputs, run_id: str = "run", **options) -> core.ConformanceReport:
+        report = core.conform(factory, inputs, run_id=run_id, **options)
         assert report.passed, str(report)
         return report
 
