@@ -80,6 +80,46 @@ class LostAgent:
         return {"done": list(self.store.data.get("done", []))}
 
 
+class EagerAgent:
+    """Checkpoints "done" BEFORE doing the work: safe for crash-after, loses work on crash-before."""
+
+    def __init__(self, ctx: Context) -> None:
+        self.ctx = ctx
+        self.ctx.store.setdefault("done", [])
+
+    def step(self, item: str) -> None:
+        if item in self.ctx.store["done"]:
+            return
+        self.ctx.store["done"].append(item)        # checkpoint first (the bug)
+        self.ctx.effect("process", item, key=f"process:{item}")
+
+    def state(self):
+        return {"done": sorted(self.ctx.store["done"])}
+
+
+class OneShotRecoveryAgent:
+    """Reconciles against the effect log only on the FIRST restart: survives one
+    crash, replays an effect if the recovery run itself crashes."""
+
+    def __init__(self, ctx: Context) -> None:
+        self.ctx = ctx
+        st = ctx.store
+        st.setdefault("done", [])
+        if st.get("started") and not st.get("recovered"):
+            st["recovered"] = True                   # flag set before healing finishes
+            st["done"] = sorted(set(st["done"]) | {k.split(":", 1)[1] for k in ctx.effects.keys()})
+        st["started"] = True
+
+    def step(self, item: str) -> None:
+        if item in self.ctx.store["done"]:
+            return
+        self.ctx.effect("process", item, key=f"process:{item}")
+        self.ctx.store["done"].append(item)
+
+    def state(self):
+        return {"done": sorted(self.ctx.store["done"])}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="crashresume", description=__doc__.splitlines()[0])
     ap.add_argument("--version", action="version", version=f"crashresume {__version__}")
@@ -117,6 +157,20 @@ def main(argv: list[str] | None = None) -> int:
     print("LostAgent (checkpoint lost, wrongly believes stream is done):")
     print(" ", lost)
     ok &= not lost.passed and any(f.kind == "state_lost" for f in lost.findings)
+
+    eager_default = conform(EagerAgent, inputs)
+    eager = conform(EagerAgent, inputs, crash_before=True)
+    print("EagerAgent (checkpoints before the work) - default mode, then crash_before=True:")
+    print(" ", eager_default)
+    print(" ", eager)
+    ok &= eager_default.passed and any(f.kind == "effect_lost" for f in eager.findings)
+
+    once_single = conform(OneShotRecoveryAgent, inputs)
+    once = conform(OneShotRecoveryAgent, inputs, max_crashes=2)
+    print("OneShotRecoveryAgent (recovery not crash-safe) - one crash, then max_crashes=2:")
+    print(" ", once_single)
+    print(" ", once)
+    ok &= once_single.passed and any(f.kind == "effect_replayed" for f in once.findings)
 
     print("\nselftest:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
