@@ -34,6 +34,7 @@ import inspect
 import json
 import re
 import reprlib
+import threading
 from collections import Counter
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -166,6 +167,12 @@ class KeyView(_abc.Sequence):
             return list(self) == list(other)
         return NotImplemented
 
+    def __add__(self, other: Any) -> List[Any]:
+        return list(self) + list(other)
+
+    def __radd__(self, other: Any) -> List[Any]:
+        return list(other) + list(self)
+
     __hash__ = None  # type: ignore[assignment]
 
     def __repr__(self) -> str:
@@ -233,6 +240,9 @@ class Context:
         self.effects = log
         self.store: Dict[str, Any] = {} if store is None else store
         self.fs: Any = SimFS() if fs is None else fs
+        self._pending = ""
+        self._owner = threading.get_ident()
+        self.off_thread = False   # a crash point was hit on a thread other than the one that built the context
         self.trace = trace   # when a list: one line per crash point (used by explain())
         self.fs._bind(self._begin, self._end, self._note)
         self._log = log
@@ -252,19 +262,23 @@ class Context:
         self.points.append(kind)
         desc = label or f"{kind} #{self._count}"
         if self.trace is not None:
-            self.trace.append(f"#{self._count} {kind}:")
+            self.trace.append(f"#{self._count} {kind}:" + (f" {self._pending}" if self._pending else ""))
+            self._pending = ""
         armed = self._crash_at is not None and self._count >= self._crash_at
         if armed:
             if self.crashed:
                 self.swallowed = True   # already "dead" once: the first crash was caught
             self.crashed = True
+            if threading.get_ident() != self._owner:
+                self.off_thread = True
             if self._crash_when == BEFORE:
                 self._die(f"crash injected before {desc}")
         return armed, desc
 
     def _note(self, text: str) -> None:
-        if self.trace is not None and self.trace:
-            self.trace[-1] += " " + text
+        """Describe the NEXT crash point (call just before ``_begin``); used by explain()."""
+        if self.trace is not None:
+            self._pending = text
 
     def _end(self, token: Tuple[bool, str], kind: str = "") -> None:
         armed, desc = token
@@ -285,9 +299,9 @@ class Context:
                 hash(key)
             except TypeError:
                 raise TypeError(f"ctx.effect key must be hashable (use a str), got {type(key).__name__}") from None
-        tok = self._begin("effect", f"effect #{self._count + 1} ({kind})")
         if self.trace is not None:
             self._note(f"{clean(str(kind))} key={_r(key)} payload={_r(payload)}")
+        tok = self._begin("effect", f"effect #{self._count + 1} ({kind})")
         if _do is not None:
             _do()
         e = self._log.record(kind, payload, key)
@@ -317,9 +331,9 @@ class Context:
             @functools.wraps(fn)
             async def awrapper(*a: Any, **kw: Any) -> Any:
                 k, p = meta(a, kw)
-                tok = self._begin("effect", f"effect #{self._count + 1} ({name})")
                 if self.trace is not None:
                     self._note(f"{clean(str(name))} key={_r(k)} payload={_r(p)}")
+                tok = self._begin("effect", f"effect #{self._count + 1} ({name})")
                 result = await fn(*a, **kw)
                 self._log.record(name, p, k)
                 self._end(tok)
@@ -512,6 +526,8 @@ def _survive(store: Dict[str, Any], isolate: bool) -> Dict[str, Any]:
 
 
 _SWALLOWED = "caught InjectedCrash and kept running; a real crash cannot be caught"
+_THREAD_HINT = (" (a crash point was hit on a worker thread: an exception there cannot stop the process, "
+                "so issue effects from the thread that runs step())")
 
 
 def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
@@ -558,14 +574,14 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
                 out.first_life_effects = len(log)
             fs.power_loss(torn=(when == TORN))
             if ctx.swallowed:
-                return fail("crash_swallowed", f"process life {life} {_SWALLOWED}")
+                return fail("crash_swallowed", f"process life {life} {_SWALLOWED}" + (_THREAD_HINT if ctx.off_thread else ""))
             continue
         except Exception as exc:  # noqa: BLE001 - reported, not hidden
             flush(lines)
             return fail("subject_error", f"process life {life} raised {type(exc).__name__}: {_r(exc)}")
         flush(lines)
         if ctx.crashed:
-            return fail("crash_swallowed", f"process life {life} {_SWALLOWED}")
+            return fail("crash_swallowed", f"process life {life} {_SWALLOWED}" + (_THREAD_HINT if ctx.off_thread else ""))
         out.unreached = (
             f"{sid}: crash {when} point #{k} never reached in process life {life} "
             "(subject issued fewer effects than the baseline - nondeterministic?); resumed without it"
@@ -837,7 +853,8 @@ def _nondeterminism(factory: Callable[[Context], Any], inputs: Sequence[Any], ru
 
     if ctx.points != base.kinds or keys(ctx.effects.effects, other) != keys(base.effects, run_id):
         return ("two identical crash-free runs issued different crash points or keys - the subject looks "
-                "nondeterministic (time, randomness, dict/set order?), so crash point numbers may not line up")
+                "nondeterministic (time, randomness, dict/set order, or state not keyed by ctx.run_id?), "
+                "so crash point numbers may not line up")
     return None
 
 

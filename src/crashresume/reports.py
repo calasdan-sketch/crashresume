@@ -27,6 +27,23 @@ RULES: Dict[str, str] = {
 }
 
 
+FIXES: Dict[str, str] = {
+    "effect_replayed": "Before issuing an effect, look its idempotency key up in the durable record of what already happened "
+                       "(ctx.effects.keys() in tests; your ledger or the provider's idempotency key in production), and "
+                       "make that check survive a crash during recovery too.",
+    "effect_lost": "Do not mark work done before the effect has committed: checkpoint after the effect, or write an intent "
+                   "first and reconcile it on restart.",
+    "effect_diverged": "Derive the payload for a key from stable inputs; request ids and timestamps belong outside the "
+                       "idempotent payload (or compare with payload_key=).",
+    "state_lost": "Persist the checkpoint durably (fsync the file, and its directory under strict_dirs) before relying on it.",
+    "resume_diverged": "Make recovery idempotent: re-running a step from a half-done state must reach the crash-free state.",
+    "resume_crashed": "Recovery code must itself be crash-safe; reconcile on every start, not just the first.",
+    "subject_error": "Validate checkpoints on load (torn or missing file, partial journal line) and recover instead of raising.",
+    "crash_swallowed": "Do not catch BaseException around code that performs effects; a real crash cannot be caught.",
+    "subject_hang": "Recovery waited on something a dead process still holds (a lock file, a lease): add expiry or owner checks.",
+}
+
+
 def _x(text: str) -> str:
     return _XML_BAD.sub("?", clean(text))
 
@@ -54,7 +71,8 @@ def to_junit(report: ConformanceReport, name: str = "crashresume") -> str:
 def to_sarif(report: ConformanceReport, artifact_uri: str = "crashresume") -> str:
     from . import __version__
     kinds = sorted({f.kind for f in report.findings})
-    rules = [{"id": f"crashresume/{k}", "name": k, "shortDescription": {"text": RULES.get(k, k)}} for k in kinds]
+    rules = [{"id": f"crashresume/{k}", "name": k, "shortDescription": {"text": RULES.get(k, k)},
+              "help": {"text": FIXES.get(k, RULES.get(k, k))}} for k in kinds]
     results = []
     for f in report.findings:
         results.append({

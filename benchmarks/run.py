@@ -172,8 +172,9 @@ def main(argv):
                   f"{', '.join(s['missed']) or 'none'} |")
     nd = len(dirs)
     nb = sum(1 for c in dirs if c.expected)
-    md += ["", f"Directory-durability corpus ({nd} agents, {nb} broken: a new name is not durable until its directory is fsynced):", "", "| strategy | recall | precision | crash points (total) | missed bugs |",
-           "|---|---|---|---|---|"]
+    md += ["", f"Directory-durability corpus ({nd} agents, {nb} broken: a new name is not durable until its "
+           "directory is fsynced):",
+           "", "| strategy | recall | precision | crash points (total) | missed bugs |", "|---|---|---|---|---|"]
     for label, s in result["strict_dirs"].items():
         md.append(f"| {label} | {s['recall']:.3f} | {s['precision']:.3f} | {s['crash_points_total']} | "
                   f"{', '.join(s['missed']) or 'none'} |")

@@ -79,6 +79,7 @@ def test_keyview_behaves_like_the_old_list():
     assert log.keys()[:] == ["k1", "k2"] and log.has("k2") and not log.has([1]) and log.count("k1") == 1
     with pytest.raises(IndexError):
         snap[1]
+    assert log.keys() + ["z"] == ["k1", "k2", "z"] and ["a"] + log.keys() == ["a", "k1", "k2"] and snap.index("k1") == 0
     assert sorted(log.keys()) == ["k1", "k2"] and repr(log.keys()) == "['k1', 'k2']"
 
 
@@ -245,7 +246,9 @@ def test_explain_shows_lives_kill_point_and_finding():
 
 def test_explain_lists_file_operations():
     text = explain(Publish, ["a"], [(3, "before")], strict_dirs=True)
-    assert "write out/a.tmp" in text and "rename out/a.tmp -> out/a" in text and "BEFORE this committed" in text
+    assert "write out/a.tmp" in text and "BEFORE this committed" in text
+    killed = [ln for ln in text.splitlines() if "KILLED" in ln]
+    assert len(killed) == 1 and "rename out/a.tmp -> out/a" in killed[0]       # what was about to happen
 
 
 # -- sampling -----------------------------------------------------------------------------------
@@ -377,3 +380,34 @@ def test_cli_explain_and_sample_and_strict_dirs(tmp_path):
 def test_cli_warns_about_flags_process_mode_ignores(tmp_path):
     r = _cli(tmp_path, REPLAY, "--inputs", "[1]", "--process", "--minimize", "--torn-writes")
     assert "--minimize, --torn-writes not supported with --process" in r.stderr
+
+
+@pytest.mark.filterwarnings("ignore::pytest.PytestUnhandledThreadExceptionWarning")
+def test_effect_on_worker_thread_gets_a_helpful_message():
+    import threading
+
+    class T:
+        def __init__(self, ctx):
+            self.ctx = ctx
+
+        def step(self, j):
+            t = threading.Thread(target=lambda: self.ctx.effect("x", j, key=f"k{j}"))
+            t.start()
+            t.join()
+
+    report = conform(T, [1])
+    assert [f.kind for f in report.findings] == ["crash_swallowed"]
+    assert "worker thread" in report.findings[0].detail
+
+
+def test_sarif_rules_carry_fix_hints():
+    class Replay:
+        def __init__(self, ctx):
+            self.ctx = ctx
+
+        def step(self, j):
+            self.ctx.effect("x", j, key=f"k{j}")
+
+    doc = json.loads(conform(Replay, [1]).to_sarif())
+    rule = doc["runs"][0]["tool"]["driver"]["rules"][0]
+    assert rule["id"] == "crashresume/effect_replayed" and "idempotency key" in rule["help"]["text"]

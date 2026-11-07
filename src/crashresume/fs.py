@@ -113,8 +113,8 @@ class SimFS:
     def write(self, path: str, data: Data, *, append: bool = False) -> None:
         """Write (truncate+write, or append). Not durable until ``fsync``."""
         p, d = _norm(path), _b(data)
-        tok = self._begin("fs.write")
         self._note(f"write {p} ({len(d)}B{' append' if append else ''})")
+        tok = self._begin("fs.write")
         f = self._files.get(p)
         if f is None:
             f = self._files[p] = _File()
@@ -130,8 +130,8 @@ class SimFS:
         p = _norm(path)
         if p not in self._files:
             raise FileNotFoundError(path)
-        tok = self._begin("fs.fsync")
         self._note(f"fsync {p}")
+        tok = self._begin("fs.fsync")
         self._files[p].durable = self._files[p].current
         self.ops.append(f"fsync {p}")
         self._end(tok, "fs.fsync")
@@ -141,8 +141,8 @@ class SimFS:
         s, d = _norm(src), _norm(dst)
         if s not in self._files:
             raise FileNotFoundError(src)
-        tok = self._begin("fs.rename")
         self._note(f"rename {s} -> {d}")
+        tok = self._begin("fs.rename")
         self._files[d] = self._files.pop(s)
         self.ops.append(f"rename {s} -> {d}")
         self._end(tok, "fs.rename")
@@ -151,8 +151,8 @@ class SimFS:
         p = _norm(path)
         if p not in self._files:
             raise FileNotFoundError(path)
-        tok = self._begin("fs.remove")
         self._note(f"remove {p}")
+        tok = self._begin("fs.remove")
         del self._files[p]
         self.ops.append(f"remove {p}")
         self._end(tok, "fs.remove")
@@ -165,8 +165,8 @@ class SimFS:
         ``dir_durability`` is on. Directories are implicit: any prefix is valid.
         """
         d = "" if path in ("", ".", "./") else _norm(path)
-        tok = self._begin("fs.fsync_dir")
         self._note(f"fsync_dir {d or '.'}")
+        tok = self._begin("fs.fsync_dir")
         if self.dir_durability:
             for name in [n for n in self._dnames if _parent(n) == d]:
                 del self._dnames[name]
@@ -250,8 +250,8 @@ class RealFS:
 
     def write(self, path: str, data: Data, *, append: bool = False) -> None:
         full = self._path(path)
-        tok = self._begin("fs.write")
         self._note(f"write {_norm(path)} ({len(_b(data))}B{' append' if append else ''})")
+        tok = self._begin("fs.write")
         os.makedirs(os.path.dirname(full), exist_ok=True)
         with open(full, "ab" if append else "wb") as fh:
             fh.write(_b(data))
@@ -262,8 +262,8 @@ class RealFS:
 
     def fsync(self, path: str) -> None:
         full = self._path(path)
-        tok = self._begin("fs.fsync")
         self._note(f"fsync {_norm(path)}")
+        tok = self._begin("fs.fsync")
         fd = os.open(full, os.O_RDWR if os.name == "nt" else os.O_RDONLY)
         try:
             os.fsync(fd)
@@ -273,15 +273,15 @@ class RealFS:
 
     def rename(self, src: str, dst: str) -> None:
         a, b = self._path(src), self._path(dst)
-        tok = self._begin("fs.rename")
         self._note(f"rename {_norm(src)} -> {_norm(dst)}")
+        tok = self._begin("fs.rename")
         os.replace(a, b)
         self._end(tok, "fs.rename")
 
     def remove(self, path: str) -> None:
         full = self._path(path)
-        tok = self._begin("fs.remove")
         self._note(f"remove {_norm(path)}")
+        tok = self._begin("fs.remove")
         os.remove(full)
         self._end(tok, "fs.remove")
 
@@ -289,8 +289,8 @@ class RealFS:
         """fsync a directory so its names are durable (a no-op where directories cannot be opened, e.g. Windows)."""
         d = "" if path in ("", ".", "./") else _norm(path)
         full = self.root if not d else self._path(d)
-        tok = self._begin("fs.fsync_dir")
         self._note(f"fsync_dir {d or '.'}")
+        tok = self._begin("fs.fsync_dir")
         if os.name != "nt":
             fd = os.open(full, os.O_RDONLY)
             try:
