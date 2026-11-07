@@ -33,3 +33,10 @@ jobs:
       - name: Self-test demo
         run: crashresume --selftest
 
+      - name: Benchmark is reproducible (committed numbers match)
+        run: |
+          pip install langgraph
+          python benchmarks/run.py > /dev/null
+          git diff --exit-code benchmarks/RESULTS.json
+      - name: LangGraph example
+        run: python examples/langgraph_resume.py

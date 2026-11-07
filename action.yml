@@ -1,0 +1,46 @@
+name: crashresume
+description: Crash-test an agent at every side-effect boundary and fail the job on double charges, lost work or corrupt checkpoints.
+inputs:
+  target:
+    description: "Agent factory as package.module:factory (or path/to/file.py:factory)"
+    required: true
+  inputs:
+    description: "JSON list of inputs for step(), e.g. '[\"a\",\"b\"]'"
+    required: true
+  args:
+    description: "Extra crashresume flags, e.g. '--thorough --minimize' or '--process'"
+    required: false
+    default: "--thorough"
+  python-version:
+    description: Python version
+    required: false
+    default: "3.12"
+  sarif:
+    description: Path of the SARIF file to write (upload it with github/codeql-action/upload-sarif)
+    required: false
+    default: crashresume.sarif
+  junit:
+    description: Path of the JUnit XML file to write
+    required: false
+    default: crashresume-junit.xml
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+    - name: Install crashresume from this action's checkout
+      shell: bash
+      run: python -m pip install "${{ github.action_path }}"
+    - name: Crash-test
+      shell: bash
+      env:
+        CR_TARGET: ${{ inputs.target }}
+        CR_INPUTS: ${{ inputs.inputs }}
+        CR_ARGS: ${{ inputs.args }}
+        CR_SARIF: ${{ inputs.sarif }}
+        CR_JUNIT: ${{ inputs.junit }}
+      run: |
+        # values arrive via env vars, never interpolated into the script (no shell injection)
+        # shellcheck disable=SC2086
+        crashresume "$CR_TARGET" --inputs "$CR_INPUTS" --sarif "$CR_SARIF" --junit "$CR_JUNIT" $CR_ARGS

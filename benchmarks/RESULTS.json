@@ -1,0 +1,887 @@
+{
+  "corpus": {
+    "agents": 24,
+    "broken": 16,
+    "correct": 8
+  },
+  "process_mode": [
+    {
+      "case": "ProcGood",
+      "expected": [],
+      "process_crash_points": 3,
+      "process_flagged": false,
+      "process_kinds": [],
+      "simulated_flagged": false,
+      "simulated_thorough_flagged": false,
+      "simulated_thorough_kinds": []
+    },
+    {
+      "case": "ProcMemoryCheckpoint",
+      "expected": [
+        "effect_replayed"
+      ],
+      "process_crash_points": 3,
+      "process_flagged": true,
+      "process_kinds": [
+        "effect_replayed",
+        "resume_diverged"
+      ],
+      "simulated_flagged": false,
+      "simulated_thorough_flagged": true,
+      "simulated_thorough_kinds": [
+        "effect_lost",
+        "resume_diverged"
+      ]
+    },
+    {
+      "case": "ProcFinallyCheckpoint",
+      "expected": [
+        "effect_replayed"
+      ],
+      "process_crash_points": 3,
+      "process_flagged": true,
+      "process_kinds": [
+        "effect_replayed",
+        "resume_diverged"
+      ],
+      "simulated_flagged": false,
+      "simulated_thorough_flagged": true,
+      "simulated_thorough_kinds": [
+        "effect_lost",
+        "resume_diverged"
+      ]
+    }
+  ],
+  "strategies": {
+    "0.2.0-equivalent": {
+      "crash_points_total": 78,
+      "f1": 0.667,
+      "false_alarms": [],
+      "fn": 8,
+      "fp": 0,
+      "missed": [
+        "eager_checkpoint",
+        "one_shot_recovery",
+        "payload_drift",
+        "keyless_double_send",
+        "fs_artifact_no_fsync",
+        "fs_rename_no_fsync",
+        "fs_torn_cursor",
+        "fs_torn_journal"
+      ],
+      "precision": 1.0,
+      "recall": 0.5,
+      "rows": [
+        {
+          "case": "reconcile_ledger",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "ledger_only",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "two_effects_reconciled",
+          "crash_points": 6,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "write_ahead_intent",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "tool_wrapped_good",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "payload_stable",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_atomic_artifact",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_journal_fsync",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "replay_no_reconcile",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "eager_checkpoint",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "effect_lost"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "restart_means_eof",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "effect_lost",
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_lost",
+            "resume_diverged",
+            "state_lost"
+          ]
+        },
+        {
+          "case": "one_shot_recovery",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "partial_batch",
+          "crash_points": 6,
+          "detected": true,
+          "expected": [
+            "effect_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_lost",
+            "resume_diverged"
+          ]
+        },
+        {
+          "case": "payload_drift",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "effect_diverged"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "keyless_double_send",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "swallows_crash",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "crash_swallowed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "crash_swallowed"
+          ]
+        },
+        {
+          "case": "double_count_on_resume",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "resume_diverged"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged"
+          ]
+        },
+        {
+          "case": "tool_wrapped_replay",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "function_loop_replay",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "fs_artifact_no_fsync",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_rename_no_fsync",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "resume_diverged",
+            "state_lost",
+            "subject_error"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_torn_cursor",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "subject_error"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_torn_journal",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "resume_diverged"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_stale_lock",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "subject_error"
+          ],
+          "flagged": true,
+          "kinds": [
+            "subject_error"
+          ]
+        }
+      ],
+      "tp": 8
+    },
+    "default": {
+      "crash_points_total": 147,
+      "f1": 0.815,
+      "false_alarms": [],
+      "fn": 5,
+      "fp": 0,
+      "missed": [
+        "eager_checkpoint",
+        "one_shot_recovery",
+        "payload_drift",
+        "keyless_double_send",
+        "fs_torn_journal"
+      ],
+      "precision": 1.0,
+      "recall": 0.688,
+      "rows": [
+        {
+          "case": "reconcile_ledger",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "ledger_only",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "two_effects_reconciled",
+          "crash_points": 6,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "write_ahead_intent",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "tool_wrapped_good",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "payload_stable",
+          "crash_points": 3,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_atomic_artifact",
+          "crash_points": 21,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_journal_fsync",
+          "crash_points": 9,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "replay_no_reconcile",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "eager_checkpoint",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "effect_lost"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "restart_means_eof",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "effect_lost",
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_lost",
+            "resume_diverged",
+            "state_lost"
+          ]
+        },
+        {
+          "case": "one_shot_recovery",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "partial_batch",
+          "crash_points": 6,
+          "detected": true,
+          "expected": [
+            "effect_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_lost",
+            "resume_diverged"
+          ]
+        },
+        {
+          "case": "payload_drift",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "effect_diverged"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "keyless_double_send",
+          "crash_points": 3,
+          "detected": false,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "swallows_crash",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "crash_swallowed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "crash_swallowed"
+          ]
+        },
+        {
+          "case": "double_count_on_resume",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "resume_diverged"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged"
+          ]
+        },
+        {
+          "case": "tool_wrapped_replay",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "function_loop_replay",
+          "crash_points": 3,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "fs_artifact_no_fsync",
+          "crash_points": 15,
+          "detected": true,
+          "expected": [
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged",
+            "state_lost"
+          ]
+        },
+        {
+          "case": "fs_rename_no_fsync",
+          "crash_points": 18,
+          "detected": true,
+          "expected": [
+            "resume_diverged",
+            "state_lost",
+            "subject_error"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged",
+            "state_lost"
+          ]
+        },
+        {
+          "case": "fs_torn_cursor",
+          "crash_points": 9,
+          "detected": true,
+          "expected": [
+            "subject_error"
+          ],
+          "flagged": true,
+          "kinds": [
+            "subject_error"
+          ]
+        },
+        {
+          "case": "fs_torn_journal",
+          "crash_points": 9,
+          "detected": false,
+          "expected": [
+            "resume_diverged"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_stale_lock",
+          "crash_points": 9,
+          "detected": true,
+          "expected": [
+            "subject_error"
+          ],
+          "flagged": true,
+          "kinds": [
+            "subject_error"
+          ]
+        }
+      ],
+      "tp": 11
+    },
+    "random-kill x5": {
+      "crash_points_per_agent": 5.0,
+      "note": "expected recall over 200 seeds",
+      "precision": 1.0,
+      "recall": 0.497
+    },
+    "thorough": {
+      "crash_points_total": 4726,
+      "f1": 1.0,
+      "false_alarms": [],
+      "fn": 0,
+      "fp": 0,
+      "missed": [],
+      "precision": 1.0,
+      "recall": 1.0,
+      "rows": [
+        {
+          "case": "reconcile_ledger",
+          "crash_points": 24,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "ledger_only",
+          "crash_points": 24,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "two_effects_reconciled",
+          "crash_points": 84,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "write_ahead_intent",
+          "crash_points": 24,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "tool_wrapped_good",
+          "crash_points": 24,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "payload_stable",
+          "crash_points": 24,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_atomic_artifact",
+          "crash_points": 1452,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "fs_journal_fsync",
+          "crash_points": 285,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "replay_no_reconcile",
+          "crash_points": 30,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "eager_checkpoint",
+          "crash_points": 18,
+          "detected": true,
+          "expected": [
+            "effect_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_lost"
+          ]
+        },
+        {
+          "case": "restart_means_eof",
+          "crash_points": 6,
+          "detected": true,
+          "expected": [
+            "effect_lost",
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_lost",
+            "resume_diverged",
+            "state_lost"
+          ]
+        },
+        {
+          "case": "one_shot_recovery",
+          "crash_points": 24,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "partial_batch",
+          "crash_points": 72,
+          "detected": true,
+          "expected": [
+            "effect_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_lost",
+            "resume_diverged"
+          ]
+        },
+        {
+          "case": "payload_drift",
+          "crash_points": 24,
+          "detected": true,
+          "expected": [
+            "effect_diverged"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_diverged"
+          ]
+        },
+        {
+          "case": "keyless_double_send",
+          "crash_points": 30,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "swallows_crash",
+          "crash_points": 6,
+          "detected": true,
+          "expected": [
+            "crash_swallowed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "crash_swallowed"
+          ]
+        },
+        {
+          "case": "double_count_on_resume",
+          "crash_points": 24,
+          "detected": true,
+          "expected": [
+            "resume_diverged"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged"
+          ]
+        },
+        {
+          "case": "tool_wrapped_replay",
+          "crash_points": 30,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "function_loop_replay",
+          "crash_points": 30,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "fs_artifact_no_fsync",
+          "crash_points": 804,
+          "detected": true,
+          "expected": [
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged",
+            "state_lost"
+          ]
+        },
+        {
+          "case": "fs_rename_no_fsync",
+          "crash_points": 1104,
+          "detected": true,
+          "expected": [
+            "resume_diverged",
+            "state_lost",
+            "subject_error"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged",
+            "state_lost"
+          ]
+        },
+        {
+          "case": "fs_torn_cursor",
+          "crash_points": 190,
+          "detected": true,
+          "expected": [
+            "subject_error"
+          ],
+          "flagged": true,
+          "kinds": [
+            "subject_error"
+          ]
+        },
+        {
+          "case": "fs_torn_journal",
+          "crash_points": 264,
+          "detected": true,
+          "expected": [
+            "resume_diverged"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged"
+          ]
+        },
+        {
+          "case": "fs_stale_lock",
+          "crash_points": 129,
+          "detected": true,
+          "expected": [
+            "subject_error"
+          ],
+          "flagged": true,
+          "kinds": [
+            "subject_error"
+          ]
+        }
+      ],
+      "tp": 16
+    }
+  }
+}

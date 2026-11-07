@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "crashresume"
-version = "0.2.0"
+version = "0.3.0"
 description = "Conformance harness that proves an agent survives crash/restart without losing state or replaying effects"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -7,17 +7,27 @@ from .core import (
     EffectLog,
     Finding,
     InjectedCrash,
+    Repro,
     conform,
+    replay,
 )
+from .fs import RealFS, SimFS
+from .process import SetupError, conform_process
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
     "conform",
+    "conform_process",
+    "replay",
     "Context",
     "Effect",
     "EffectLog",
     "Finding",
     "InjectedCrash",
     "ConformanceReport",
+    "Repro",
+    "SimFS",
+    "RealFS",
+    "SetupError",
     "__version__",
 ]

@@ -1,12 +1,14 @@
-"""crashresume CLI: a self-test demo that exercises good and bad agents."""
+"""crashresume CLI: crash-test an agent (``crashresume pkg.mod:factory --inputs '["a","b"]'``) or run the self-test demo."""
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 from . import __version__
-from .core import Context, conform
+from .core import Context, clean, conform
 
 
 class _Store:
@@ -120,15 +122,74 @@ class OneShotRecoveryAgent:
         return {"done": sorted(self.ctx.store["done"])}
 
 
-def main(argv: list[str] | None = None) -> int:
+def _write(path: str, text: str) -> None:
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(text)
+
+
+def _run_target(args: argparse.Namespace) -> int:
+    """Crash-test ``args.target``. Exit 0 pass, 1 findings, 2 bad setup (fails closed)."""
+    try:
+        if args.inputs_file:
+            with open(args.inputs_file, "r", encoding="utf-8") as fh:
+                inputs = json.load(fh)
+        else:
+            inputs = json.loads(args.inputs) if args.inputs is not None else None
+        if not isinstance(inputs, list) or not inputs:
+            raise ValueError("--inputs / --inputs-file must be a non-empty JSON list")
+        opts: Dict[str, Any] = dict(
+            crash_before=args.crash_before, max_crashes=args.max_crashes, max_scenarios=args.max_scenarios or None,
+            strict_keyless=args.strict_keyless, thorough=args.thorough, check_payloads=True if args.check_payloads else None,
+        )
+        if args.process:
+            from .process import conform_process
+            report = conform_process(args.target, inputs, timeout=args.timeout, **opts)
+        else:
+            from ._child import _load
+            sys.path.insert(0, os.getcwd())
+            report = conform(_load(args.target), inputs, torn_writes=args.torn_writes, minimize=args.minimize,
+                             fail_fast=args.fail_fast, **opts)
+    except Exception as exc:  # noqa: BLE001 - bad setup must not look like a pass
+        print(f"crashresume: cannot run: {type(exc).__name__}: {clean(str(exc))}", file=sys.stderr)
+        return 2
+    print(report)
+    if args.json:
+        _write(args.json, report.to_json(indent=2, sort_keys=True) + "\n")
+    if args.junit:
+        _write(args.junit, report.to_junit(args.target))
+    if args.sarif:
+        _write(args.sarif, report.to_sarif(args.sarif_uri or args.target.split(":")[0]))
+    return 0 if report.passed else 1
+
+
+def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="crashresume", description=__doc__.splitlines()[0])
     ap.add_argument("--version", action="version", version=f"crashresume {__version__}")
     ap.add_argument("--selftest", action="store_true", help="run the built-in good/bad agent demo")
+    ap.add_argument("target", nargs="?", help="agent factory as 'package.module:factory' or 'path/to/file.py:factory'")
+    ap.add_argument("--inputs", help="JSON list of inputs fed to step(), e.g. '[\"a\",\"b\"]'")
+    ap.add_argument("--inputs-file", help="file holding the JSON list of inputs")
+    ap.add_argument("--crash-before", action="store_true", help="also crash just before each effect")
+    ap.add_argument("--max-crashes", type=int, default=1, help="crashes per scenario (2 = crash during recovery)")
+    ap.add_argument("--max-scenarios", type=int, default=10_000, help="scenario cap (0 = unlimited)")
+    ap.add_argument("--thorough", action="store_true", help="crash-before + 2 crashes + torn writes + strict keyless")
+    ap.add_argument("--torn-writes", action="store_true", help="tear un-fsynced ctx.fs writes at each write")
+    ap.add_argument("--strict-keyless", action="store_true", help="repeated keyless effects are findings")
+    ap.add_argument("--check-payloads", action="store_true", help="flag re-issued keys whose payload changed")
+    ap.add_argument("--minimize", action="store_true", help="shrink each finding to a minimal reproduction")
+    ap.add_argument("--fail-fast", action="store_true", help="stop at the first finding")
+    ap.add_argument("--process", action="store_true", help="really SIGKILL a fresh subprocess per life (inputs must be JSON)")
+    ap.add_argument("--timeout", type=float, default=30.0, help="per-process timeout in seconds (--process)")
+    ap.add_argument("--json", metavar="PATH", help="write the report as JSON")
+    ap.add_argument("--junit", metavar="PATH", help="write a JUnit XML report")
+    ap.add_argument("--sarif", metavar="PATH", help="write a SARIF 2.1.0 report")
+    ap.add_argument("--sarif-uri", help="file shown in SARIF locations (default: the target module)")
     args = ap.parse_args(argv)
+    if args.target:
+        return _run_target(args)
     if not args.selftest:
         ap.print_help()
         return 2
-
     inputs = ["a", "b", "c"]
     ok = True
 
