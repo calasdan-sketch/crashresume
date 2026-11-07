@@ -10,8 +10,11 @@ On a labelled corpus of 24 sample agents (16 intentionally broken) the thorough 
 
 ```bash
 pip install crashresume
-crashresume --selftest      # one correct agent passes, four broken ones are caught
+crashresume --version       # needs 0.3.0 or newer; older releases lack most of what is described below
+crashresume --selftest      # one correct agent passes, five broken ones are caught (exit 0 = all as expected)
 ```
+
+From a checkout instead: `pip install .` (or `pip install -e . pytest` for development; `pytest` also runs without installing).
 
 ```python
 from crashresume import conform
@@ -59,7 +62,7 @@ conformance: 6 crash point(s) tested, 3 finding(s)
 | `crash_swallowed` | the subject caught the injected crash (`except BaseException`) and kept going, even if it died again later |
 | `subject_hang` | process mode only: a child exceeded its timeout and was killed |
 
-Each finding kind has a one-line fix hint in the SARIF output (`help` text of the rule).
+Each finding kind has a one-line fix hint in the SARIF output (`help` text of the rule). `str(report)` and the CLI list at most 100 findings and say how many more there are; `report.findings`, `--json`, `--sarif` and `--junit` always hold all of them.
 
 A run that tested nothing (no effects recorded, or no inputs) still returns `passed`, but `report.vacuous` is true; the pytest fixture and the CLI treat that as a failure (`allow_vacuous=True` / `--allow-vacuous` to accept it). Warnings (not failures) flag runs with no effects, a baseline that itself issues a key more than once, keyless effects that repeated, injected crashes that were never reached, and a hit `max_scenarios` cap - a truncated or untested run is never reported as a silent pass.
 
@@ -114,7 +117,7 @@ Rules: inputs are JSON, keys are `str`/`int`, durable state goes in `ctx.fs` (a 
 minimal repro for effect_replayed: inputs=['b'] crashes=[after #1] - key 'pay:b' issued 2 times
 ```
 
-`replay(factory, inputs, finding.crashes)` re-runs exactly that one scenario for a debugger. `explain(factory, inputs, finding.crashes)` returns a timeline of it (also `crashresume ... --explain`):
+`replay(factory, inputs, finding.crashes)` re-runs exactly that one scenario for a debugger. `explain(factory, inputs, finding.crashes)` returns a timeline of it (also `crashresume ... --explain`; abridged here, the real output also lists the baseline and every effect across all lives):
 
 ```
 scenario run-1: crash after point #1
@@ -133,11 +136,11 @@ Any framework fits if you route its tools through `ctx.tool(fn, key=...)` (sync 
 
 ```bash
 crashresume myagent.agent:make_agent --inputs '["a","b","c"]' --thorough --minimize \
-    --junit crashresume-junit.xml --sarif crashresume.sarif     # exit 0 pass, 1 findings, 2 bad setup
+    --junit crashresume-junit.xml --sarif crashresume.sarif     # exit 0 pass, 1 findings, 2 bad setup or unwritable report file
 crashresume myagent.agent:make_agent --inputs '["a","b"]' --process   # real SIGKILLs
 ```
 
-Reports are deterministic (no timestamps), so CI diffs stay quiet. `action.yml` is a composite GitHub Action (`uses: calasdan-sketch/crashresume@<ref>` with `target:` and `inputs:`); upload the SARIF with `github/codeql-action/upload-sarif`. Untrusted characters (terminal escapes, bidi and zero-width marks) in payloads, keys and exception text are escaped in every output.
+Reports are deterministic (no timestamps), so CI diffs stay quiet. `action.yml` is a composite GitHub Action (`uses: calasdan-sketch/crashresume@<ref>` with `target:` and `inputs:`); upload the SARIF with `github/codeql-action/upload-sarif`. Untrusted characters (terminal escapes, bidi and zero-width marks) in payloads, keys and exception text are escaped in every output. Setup mistakes (bad JSON, unknown module, unwritable report path, an agent that calls `sys.exit`) print one plain line on stderr and exit 2, never a traceback; a console that cannot show a character (Windows cp1252, `LANG=C`) gets an escape instead of an error; report files are written to a temp file and renamed, so CI never sees a half-written report.
 
 ## pytest
 
@@ -213,7 +216,7 @@ Caveats: the corpus was written together with the tool, so 1.00 is a regression 
 - **`sample=N` is a subset, not a proof.** It exists for inputs with hundreds of steps, where every scenario replays every input (cost is roughly quadratic).
 - **Cost grows with depth.** For N effects and an agent that resumes where it left off, the default runs N scenarios; `max_crashes=2` runs N + N(N+1)/2 (65 for N=10); `crash_before=True` roughly quadruples that (240 for N=10); `max_crashes=3` gives 285, or 2000 with `crash_before`. Each scenario replays all inputs. `max_scenarios` (default 10,000) caps both runtime and the pending-scenario queue.
 - `step()` is synchronous; `from_async` wraps async agents (it runs each step to completion, so it does not interleave concurrent tasks).
-- Process mode is covered by the test-suite on Linux; the Windows path (`os._exit(137)`) runs in CI but has had less use.
+- **Windows.** The CI file lists a Windows job, but nobody has run the round-4 changes on Windows and no passing Windows run is on record; support rests on a code review (path separators, `os.replace`, newline and console encoding, no `shell=True`, no `SIGKILL`). Python 3.9 is only syntax-checked locally (the CI file lists it). Process mode on Windows uses `os._exit(137)` instead of `SIGKILL`.
 
 ## License
 

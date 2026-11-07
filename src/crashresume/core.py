@@ -233,7 +233,7 @@ class Context:
 
     def __init__(self, run_id: str, log: EffectLog, crash_at: Optional[int] = None,
                  store: Optional[Dict[str, Any]] = None, crash_when: str = AFTER,
-                 fs: Optional[SimFS] = None, trace: Optional[List[str]] = None) -> None:
+                 fs: Optional[Any] = None, trace: Optional[List[str]] = None) -> None:
         if crash_when not in _WHENS:
             raise ValueError(f"crash_when must be one of {_WHENS}, got {crash_when!r}")
         self.run_id = run_id
@@ -421,6 +421,9 @@ class ConformanceReport:
         from .reports import to_sarif
         return to_sarif(self, artifact_uri)
 
+    #: ``str(report)`` lists at most this many findings; the rest stay in ``findings`` / JSON / SARIF / JUnit.
+    MAX_SHOWN = 100
+
     def __str__(self) -> str:
         head = (
             f"conformance: {self.crash_points} crash point(s) tested, "
@@ -430,12 +433,16 @@ class ConformanceReport:
         rep = "".join(f"\n  {r}" for r in self.repros)
         if not self.findings:
             return head + " - PASS" + warn
+        shown = self.findings[: self.MAX_SHOWN]
         body = "\n".join(
             f"  [{f.kind}] crash {f.when} {f.point} #{f.crash_after}"
             + (f" ({f.scenario})" if f.scenario else "")
             + f": {f.detail}"
-            for f in self.findings
+            for f in shown
         )
+        if len(self.findings) > len(shown):
+            body += (f"\n  ... and {len(self.findings) - len(shown)} more finding(s) not shown "
+                     "(all are in report.findings, --json, --sarif and --junit)")
         return head + "\n" + body + rep + warn
 
 

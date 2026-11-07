@@ -73,7 +73,7 @@ class _FileLog(EffectLog):
             raise TypeError("process mode needs str or int idempotency keys (they cross a process boundary as JSON)")
         payload = json.loads(json.dumps(payload, default=repr))
         line = json.dumps({"kind": kind, "payload": payload, "key": key}, default=repr)
-        with open(self._path, "a", encoding="utf-8") as fh:
+        with open(self._path, "a", encoding="utf-8", newline="\n") as fh:  # "\n" even on Windows
             fh.write(line + "\n")
             fh.flush()
             os.fsync(fh.fileno())

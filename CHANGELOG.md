@@ -2,6 +2,22 @@
 
 ## 0.3.0 (unreleased)
 
+Round 4 (the stranger's first hour: clean-venv install of the built wheel, packaging, hostile input, consoles, Windows review)
+
+Fixed
+- CLI: `--json/--junit/--sarif` to an unwritable path ended in a traceback; it is now one plain line, exit 2. Report files are written to a temp file and renamed (no half-written report).
+- CLI: a console that cannot encode a payload character (Windows cp1252, `LANG=C`) crashed `print(report)` with `UnicodeEncodeError`; output now falls back to escapes.
+- CLI: an agent calling `sys.exit()` made the CLI exit with the agent's code and no message; now exit 2 with an explanation. Ctrl-C exits 130 quietly.
+- CLI: plain-English setup errors (invalid JSON, missing module, missing file, wrong factory name); `--timeout 0` or negative is rejected.
+- `--sarif` default location used `C` as the file for Windows targets like `C:\x\a.py:make` (split on the first colon); it now splits on the last.
+- Process mode wrote the effect ledger with CRLF on Windows; it now always writes `\n`.
+- A run with hundreds of unreconciled effects produced 100,000+ finding lines; `str(report)` and the CLI show the first 100 and a count (data formats keep everything). `ConformanceReport.MAX_SHOWN` sets the cap.
+- `--selftest` prints a few findings per demo agent instead of every one, without the confusing warnings.
+
+Packaging
+- sdist now includes CHANGELOG, benchmarks, examples and `action.yml` (`MANIFEST.in`); classifiers for Python 3.9-3.13, Beta, Console, Developers; `Source` and `Changelog` URLs; `pytest` runs from a plain checkout (`pythonpath = ["src"]`).
+- Registry check (read-only): PyPI holds 0.1.1 and 0.1.0, so 0.3.0 is the next release.
+
 Round 3 (second expert panel: payments engineer, storage/file-system engineer, attacker, performance engineer, docs/DX lead, competitor engineer)
 
 Added

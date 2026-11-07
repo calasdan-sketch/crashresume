@@ -74,6 +74,8 @@ def conform_process(
 ) -> ConformanceReport:
     """Like ``conform`` but each process life is a real subprocess killed with SIGKILL."""
     _validate(max_crashes, max_scenarios, sample)
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not timeout > 0:
+        raise ValueError("timeout must be a number of seconds greater than 0")
     if check_payloads is None:
         check_payloads = payload_key is not None
     if thorough:
