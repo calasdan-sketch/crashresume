@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "src"))
 
-from corpus import corpus  # noqa: E402
+from corpus import corpus, corpus_dirs  # noqa: E402
 
 from crashresume import conform, conform_process, replay  # noqa: E402
 from crashresume.core import Context, EffectLog, _run  # noqa: E402
@@ -141,6 +141,19 @@ def main(argv):
         sc["crash_points_total"] = total
         sc["rows"] = rows
         result["strategies"][name] = sc
+    dirs = corpus_dirs()
+    result["strict_dirs"] = {}
+    for label, kw in (("thorough (names always durable)", {}), ("thorough + strict_dirs", {"strict_dirs": True})):
+        rows = []
+        for c in dirs:
+            rep = conform(c.factory, c.inputs, run_id=f"b-dirs-{c.name}", thorough=True, **kw)
+            rows.append({"case": c.name, "expected": sorted(c.expected), "kinds": sorted({f.kind for f in rep.findings}),
+                         "flagged": bool(rep.findings), "detected": detects(rep, c.expected) if c.expected else None,
+                         "crash_points": rep.crash_points})
+        sc = score(rows)
+        sc["crash_points_total"] = sum(r_["crash_points"] for r_ in rows)
+        sc["rows"] = rows
+        result["strict_dirs"][label] = sc
     result["process_mode"] = run_process()
     text = json.dumps(result, indent=2, sort_keys=True) + "\n"
     with open(HERE / "RESULTS.json", "w", encoding="utf-8", newline="\n") as fh:
@@ -156,6 +169,13 @@ def main(argv):
     for name in ("0.2.0-equivalent", "default", "thorough"):
         s = result["strategies"][name]
         md.append(f"| {name} | {s['recall']:.3f} | {s['precision']:.3f} | {s['f1']:.3f} | {s['crash_points_total']} | "
+                  f"{', '.join(s['missed']) or 'none'} |")
+    nd = len(dirs)
+    nb = sum(1 for c in dirs if c.expected)
+    md += ["", f"Directory-durability corpus ({nd} agents, {nb} broken: a new name is not durable until its directory is fsynced):", "", "| strategy | recall | precision | crash points (total) | missed bugs |",
+           "|---|---|---|---|---|"]
+    for label, s in result["strict_dirs"].items():
+        md.append(f"| {label} | {s['recall']:.3f} | {s['precision']:.3f} | {s['crash_points_total']} | "
                   f"{', '.join(s['missed']) or 'none'} |")
     md += ["", "Process mode (real SIGKILL, fresh interpreter per life) on the cases a simulator cannot judge:", "",
            "| agent | truth | simulated (default) | simulated (thorough) | real kill (default) | real-kill scenarios |",

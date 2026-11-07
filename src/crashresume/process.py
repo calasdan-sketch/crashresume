@@ -21,7 +21,7 @@ import sys
 import tempfile
 from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
-from ._child import DIED, EXIT_SETUP
+from ._child import DIED, EXIT_SETUP, load_ledger
 from .core import (
     AFTER,
     BEFORE,
@@ -46,11 +46,12 @@ class SetupError(RuntimeError):
 
 def _read_ledger(path: str) -> EffectLog:
     log = EffectLog()
-    if os.path.exists(path):
-        with open(path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                d = json.loads(line)
-                log.record(d["kind"], d["payload"], d["key"])
+    try:
+        records = load_ledger(path)
+    except ValueError as exc:
+        raise SetupError(str(exc)) from None
+    for d in records:
+        log.record(d["kind"], d["payload"], d["key"])
     return log
 
 
@@ -63,6 +64,7 @@ def conform_process(
     max_crashes: int = 1,
     max_scenarios: Optional[int] = 2_000,
     timeout: float = 30.0,
+    sample: Optional[int] = None,
     check_payloads: Optional[bool] = None,
     payload_key: Optional[Callable[[Any], Any]] = None,
     strict_keyless: bool = False,
@@ -71,7 +73,7 @@ def conform_process(
     workdir: Optional[str] = None,
 ) -> ConformanceReport:
     """Like ``conform`` but each process life is a real subprocess killed with SIGKILL."""
-    _validate(max_crashes, max_scenarios)
+    _validate(max_crashes, max_scenarios, sample)
     if check_payloads is None:
         check_payloads = payload_key is not None
     if thorough:
@@ -172,7 +174,7 @@ def conform_process(
         modes = (AFTER, BEFORE) if crash_before else (AFTER,)
         report = _explore(run_id, base, play, modes=modes, torn=False, max_crashes=max_crashes,
                           max_scenarios=max_scenarios, check_payloads=check_payloads, payload_key=payload_key,
-                          strict_keyless=strict_keyless)
+                          strict_keyless=strict_keyless, sample=sample)
         report.warnings.insert(0, "process mode: crashes are real SIGKILLs; torn writes are not modelled here (use conform)")
         return report
     finally:

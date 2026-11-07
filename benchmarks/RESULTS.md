@@ -9,6 +9,13 @@ Corpus: 24 agents (16 broken, 8 correct). Detection = at least one finding of an
 | default | 0.688 | 1.000 | 0.815 | 147 | eager_checkpoint, one_shot_recovery, payload_drift, keyless_double_send, fs_torn_journal |
 | thorough | 1.000 | 1.000 | 1.000 | 4726 | none |
 
+Directory-durability corpus (4 agents, 2 broken: a new name is not durable until its directory is fsynced):
+
+| strategy | recall | precision | crash points (total) | missed bugs |
+|---|---|---|---|---|
+| thorough (names always durable) | 0.000 | 1.000 | 1992 | dirs_rename_no_dir_fsync, dirs_create_no_dir_fsync |
+| thorough + strict_dirs | 1.000 | 1.000 | 2232 | none |
+
 Process mode (real SIGKILL, fresh interpreter per life) on the cases a simulator cannot judge:
 
 | agent | truth | simulated (default) | simulated (thorough) | real kill (default) | real-kill scenarios |

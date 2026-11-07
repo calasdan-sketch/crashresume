@@ -498,3 +498,68 @@ def corpus() -> List[Case]:
         Case("fs_torn_journal", FsTornJournal, frozenset({"resume_diverged"}), "torn journal tail accepted as data"),
         Case("fs_stale_lock", FsStaleLock, frozenset({"subject_error"}), "lock file left behind by a crash"),
     ]
+
+
+# -- directory-durability cases (strict_dirs): a separate, smaller corpus so the 24-agent
+#    numbers above stay comparable across versions ---------------------------------------
+class _Publisher:
+    """Writes a result file, then records 'published'; recovery trusts the record."""
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+
+    def _write(self, item):
+        raise NotImplementedError
+
+    def step(self, item):
+        if f"pub:{item}" in self.ctx.effects.keys():
+            return
+        self._write(item)
+        self.ctx.effect("published", item, key=f"pub:{item}")
+
+    def state(self):
+        return self.ctx.fs.listdir("out")
+
+
+class DirsAtomicWrite(_Publisher):
+    def _write(self, item):
+        self.ctx.fs.write_atomic(f"out/{item}", "report")
+
+
+class DirsRenameThenFsyncDir(_Publisher):
+    def _write(self, item):
+        fs = self.ctx.fs
+        fs.write(f"out/{item}.tmp", "report")
+        fs.fsync(f"out/{item}.tmp")
+        fs.rename(f"out/{item}.tmp", f"out/{item}")
+        fs.fsync_dir("out")
+
+
+class DirsRenameNoDirFsync(_Publisher):
+    """temp + fsync + rename, but the directory is never fsynced: the new name can vanish."""
+
+    def _write(self, item):
+        fs = self.ctx.fs
+        fs.write(f"out/{item}.tmp", "report")
+        fs.fsync(f"out/{item}.tmp")
+        fs.rename(f"out/{item}.tmp", f"out/{item}")
+
+
+class DirsCreateNoDirFsync(_Publisher):
+    """New file written and fsynced in place, but its directory entry was never made durable."""
+
+    def _write(self, item):
+        fs = self.ctx.fs
+        fs.write(f"out/{item}", "report")
+        fs.fsync(f"out/{item}")
+
+
+def corpus_dirs() -> List[Case]:
+    ok: FrozenSet[str] = frozenset()
+    bad = frozenset({"resume_diverged", "state_lost"})
+    return [
+        Case("dirs_atomic_write", DirsAtomicWrite, ok, "write_atomic includes the directory fsync under strict_dirs"),
+        Case("dirs_rename_then_fsync_dir", DirsRenameThenFsyncDir, ok, "explicit fsync_dir after rename"),
+        Case("dirs_rename_no_dir_fsync", DirsRenameNoDirFsync, bad, "fsynced temp file renamed, directory never synced"),
+        Case("dirs_create_no_dir_fsync", DirsCreateNoDirFsync, bad, "fsynced new file whose name is not durable"),
+    ]

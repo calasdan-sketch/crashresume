@@ -883,5 +883,118 @@
       ],
       "tp": 16
     }
+  },
+  "strict_dirs": {
+    "thorough (names always durable)": {
+      "crash_points_total": 1992,
+      "f1": 0.0,
+      "false_alarms": [],
+      "fn": 2,
+      "fp": 0,
+      "missed": [
+        "dirs_rename_no_dir_fsync",
+        "dirs_create_no_dir_fsync"
+      ],
+      "precision": 1.0,
+      "recall": 0.0,
+      "rows": [
+        {
+          "case": "dirs_atomic_write",
+          "crash_points": 486,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "dirs_rename_then_fsync_dir",
+          "crash_points": 726,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "dirs_rename_no_dir_fsync",
+          "crash_points": 486,
+          "detected": false,
+          "expected": [
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "dirs_create_no_dir_fsync",
+          "crash_points": 294,
+          "detected": false,
+          "expected": [
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": false,
+          "kinds": []
+        }
+      ],
+      "tp": 0
+    },
+    "thorough + strict_dirs": {
+      "crash_points_total": 2232,
+      "f1": 1.0,
+      "false_alarms": [],
+      "fn": 0,
+      "fp": 0,
+      "missed": [],
+      "precision": 1.0,
+      "recall": 1.0,
+      "rows": [
+        {
+          "case": "dirs_atomic_write",
+          "crash_points": 726,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "dirs_rename_then_fsync_dir",
+          "crash_points": 726,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "dirs_rename_no_dir_fsync",
+          "crash_points": 486,
+          "detected": true,
+          "expected": [
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged",
+            "state_lost"
+          ]
+        },
+        {
+          "case": "dirs_create_no_dir_fsync",
+          "crash_points": 294,
+          "detected": true,
+          "expected": [
+            "resume_diverged",
+            "state_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged",
+            "state_lost"
+          ]
+        }
+      ],
+      "tp": 2
+    }
   }
 }

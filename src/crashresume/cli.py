@@ -8,7 +8,7 @@ import sys
 from typing import Any, Dict, List, Optional
 
 from . import __version__
-from .core import Context, clean, conform
+from .core import Context, clean, conform, explain
 
 
 class _Store:
@@ -143,22 +143,44 @@ def _run_target(args: argparse.Namespace) -> int:
         )
         if args.process:
             from .process import conform_process
-            report = conform_process(args.target, inputs, timeout=args.timeout, **opts)
+            ignored = [f for f, on in (("--minimize", args.minimize), ("--fail-fast", args.fail_fast),
+                                       ("--torn-writes", args.torn_writes), ("--strict-dirs", args.strict_dirs),
+                                       ("--explain", args.explain), ("--check-determinism", args.check_determinism)) if on]
+            if ignored:
+                print(f"crashresume: warning: {', '.join(ignored)} not supported with --process; ignored", file=sys.stderr)
+            report = conform_process(args.target, inputs, timeout=args.timeout, sample=args.sample, **opts)
         else:
             from ._child import _load
             sys.path.insert(0, os.getcwd())
-            report = conform(_load(args.target), inputs, torn_writes=args.torn_writes, minimize=args.minimize,
-                             fail_fast=args.fail_fast, **opts)
+            factory = _load(args.target)
+            report = conform(factory, inputs, torn_writes=args.torn_writes, minimize=args.minimize,
+                             fail_fast=args.fail_fast, strict_dirs=args.strict_dirs, sample=args.sample,
+                             check_determinism=args.check_determinism, **opts)
     except Exception as exc:  # noqa: BLE001 - bad setup must not look like a pass
         print(f"crashresume: cannot run: {type(exc).__name__}: {clean(str(exc))}", file=sys.stderr)
         return 2
     print(report)
+    if args.explain and not args.process:
+        seen = set()
+        for f in report.findings:
+            if f.crashes and f.crashes not in seen and len(seen) < 3:
+                seen.add(f.crashes)
+                try:
+                    print("\n" + explain(factory, inputs, f.crashes, strict_keyless=args.strict_keyless or args.thorough,
+                                         strict_dirs=args.strict_dirs, check_payloads=True if args.check_payloads else None))
+                except Exception as exc:  # noqa: BLE001 - explanation is best effort
+                    print(f"crashresume: could not explain {f.scenario}: {type(exc).__name__}: {clean(str(exc))}",
+                          file=sys.stderr)
     if args.json:
         _write(args.json, report.to_json(indent=2, sort_keys=True) + "\n")
     if args.junit:
         _write(args.junit, report.to_junit(args.target))
     if args.sarif:
         _write(args.sarif, report.to_sarif(args.sarif_uri or args.target.split(":")[0]))
+    if report.passed and report.vacuous and not args.allow_vacuous:
+        print("crashresume: nothing was tested (no crash scenario ran); failing closed. Route side effects through "
+              "ctx.effect / ctx.tool / ctx.fs, or pass --allow-vacuous.", file=sys.stderr)
+        return 2
     return 0 if report.passed else 1
 
 
@@ -177,6 +199,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--strict-keyless", action="store_true", help="repeated keyless effects are findings")
     ap.add_argument("--check-payloads", action="store_true", help="flag re-issued keys whose payload changed")
     ap.add_argument("--minimize", action="store_true", help="shrink each finding to a minimal reproduction")
+    ap.add_argument("--strict-dirs", action="store_true", help="file names are lost until ctx.fs.fsync_dir() (stricter fs model)")
+    ap.add_argument("--sample", type=int, metavar="N", help="test only N evenly spaced crash points per kind/level")
+    ap.add_argument("--check-determinism", action="store_true", help="run the crash-free baseline twice and warn if it differs")
+    ap.add_argument("--explain", action="store_true", help="print a step-by-step timeline for the first failing scenarios")
+    ap.add_argument("--allow-vacuous", action="store_true", help="exit 0 even when no crash scenario ran")
     ap.add_argument("--fail-fast", action="store_true", help="stop at the first finding")
     ap.add_argument("--process", action="store_true", help="really SIGKILL a fresh subprocess per life (inputs must be JSON)")
     ap.add_argument("--timeout", type=float, default=30.0, help="per-process timeout in seconds (--process)")

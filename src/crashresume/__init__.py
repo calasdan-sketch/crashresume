@@ -7,8 +7,10 @@ from .core import (
     EffectLog,
     Finding,
     InjectedCrash,
+    KeyView,
     Repro,
     conform,
+    explain,
     replay,
 )
 from .fs import RealFS, SimFS
@@ -19,6 +21,8 @@ __all__ = [
     "conform",
     "conform_process",
     "replay",
+    "explain",
+    "KeyView",
     "Context",
     "Effect",
     "EffectLog",

@@ -27,6 +27,7 @@ each new process life gets a deep copy, so live objects cannot survive a crash.
 """
 from __future__ import annotations
 
+import collections.abc as _abc
 import copy
 import functools
 import inspect
@@ -102,7 +103,9 @@ def _same_payload(a: Any, b: Any) -> bool:
             if eq:
                 return True
             if type(a).__eq__ is not object.__eq__:
-                return False          # the type defines equality: trust it
+                # the type defines equality: trust it, except that builtin containers and
+                # floats holding NaN are never == to themselves; equal reprs then mean equal
+                return type(a).__module__ == "builtins" and _norm_sig(a) == _norm_sig(b)
     except Exception:
         pass
     return _norm_sig(a) == _norm_sig(b)
@@ -124,23 +127,85 @@ class Effect:
     seq: int = 0
 
 
+class KeyView(_abc.Sequence):
+    """Read-only, list-like snapshot of the idempotency keys issued so far.
+
+    ``key in ctx.effects.keys()`` is O(1) (the README's reconcile idiom used to be
+    O(n) per call, which made whole runs cubic). Behaves like the list the old
+    ``keys()`` returned: ``len``, indexing, slicing (gives a list), iteration,
+    ``==`` against lists, ``list(view)``.
+    """
+
+    __slots__ = ("_keys", "_first", "_n")
+
+    def __init__(self, keys: List[Any], first: Dict[Any, int], n: int) -> None:
+        self._keys, self._first, self._n = keys, first, n
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, i: Any) -> Any:
+        if isinstance(i, slice):
+            return self._keys[: self._n][i]
+        if i >= self._n or i < -self._n:
+            raise IndexError("key index out of range")
+        return self._keys[i if i >= 0 else self._n + i]
+
+    def __iter__(self) -> Any:
+        for i in range(self._n):
+            yield self._keys[i]
+
+    def __contains__(self, key: object) -> bool:
+        try:
+            return self._first.get(key, self._n) < self._n
+        except TypeError:   # unhashable probe: cannot be a key
+            return False
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, (KeyView, list, tuple)):
+            return list(self) == list(other)
+        return NotImplemented
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return repr(list(self))
+
+
 class EffectLog:
     """Durable record of side effects, shared across restarts of one run."""
 
     def __init__(self) -> None:
         self._effects: List[Effect] = []
+        self._keys: List[Any] = []          # keyed effects only, in order
+        self._first: Dict[Any, int] = {}    # key -> index of its first occurrence in _keys
 
     def record(self, kind: str, payload: Any = None, key: Optional[str] = None) -> Effect:
         e = Effect(kind=kind, payload=payload, key=key, seq=len(self._effects))
         self._effects.append(e)
+        if key is not None:
+            self._first.setdefault(key, len(self._keys))
+            self._keys.append(key)
         return e
 
     @property
     def effects(self) -> List[Effect]:
         return list(self._effects)
 
-    def keys(self) -> List[str]:
-        return [e.key for e in self._effects if e.key is not None]
+    def keys(self) -> "KeyView":
+        """Keys issued so far (a snapshot; ``in`` is O(1))."""
+        return KeyView(self._keys, self._first, len(self._keys))
+
+    def has(self, key: Any) -> bool:
+        """True if an effect with this idempotency key has already happened."""
+        try:
+            return key in self._first
+        except TypeError:
+            return False
+
+    def count(self, key: Any) -> int:
+        """How many effects carry this key."""
+        return sum(1 for k in self._keys if k == key) if self.has(key) else 0
 
     def __len__(self) -> int:
         return len(self._effects)
@@ -161,14 +226,15 @@ class Context:
 
     def __init__(self, run_id: str, log: EffectLog, crash_at: Optional[int] = None,
                  store: Optional[Dict[str, Any]] = None, crash_when: str = AFTER,
-                 fs: Optional[SimFS] = None) -> None:
+                 fs: Optional[SimFS] = None, trace: Optional[List[str]] = None) -> None:
         if crash_when not in _WHENS:
             raise ValueError(f"crash_when must be one of {_WHENS}, got {crash_when!r}")
         self.run_id = run_id
         self.effects = log
         self.store: Dict[str, Any] = {} if store is None else store
         self.fs: Any = SimFS() if fs is None else fs
-        self.fs._bind(self._begin, self._end)
+        self.trace = trace   # when a list: one line per crash point (used by explain())
+        self.fs._bind(self._begin, self._end, self._note)
         self._log = log
         self._crash_at = crash_at
         self._crash_when = crash_when
@@ -185,6 +251,8 @@ class Context:
         self._count += 1
         self.points.append(kind)
         desc = label or f"{kind} #{self._count}"
+        if self.trace is not None:
+            self.trace.append(f"#{self._count} {kind}:")
         armed = self._crash_at is not None and self._count >= self._crash_at
         if armed:
             if self.crashed:
@@ -193,6 +261,10 @@ class Context:
             if self._crash_when == BEFORE:
                 self._die(f"crash injected before {desc}")
         return armed, desc
+
+    def _note(self, text: str) -> None:
+        if self.trace is not None and self.trace:
+            self.trace[-1] += " " + text
 
     def _end(self, token: Tuple[bool, str], kind: str = "") -> None:
         armed, desc = token
@@ -214,6 +286,8 @@ class Context:
             except TypeError:
                 raise TypeError(f"ctx.effect key must be hashable (use a str), got {type(key).__name__}") from None
         tok = self._begin("effect", f"effect #{self._count + 1} ({kind})")
+        if self.trace is not None:
+            self._note(f"{clean(str(kind))} key={_r(key)} payload={_r(payload)}")
         if _do is not None:
             _do()
         e = self._log.record(kind, payload, key)
@@ -244,6 +318,8 @@ class Context:
             async def awrapper(*a: Any, **kw: Any) -> Any:
                 k, p = meta(a, kw)
                 tok = self._begin("effect", f"effect #{self._count + 1} ({name})")
+                if self.trace is not None:
+                    self._note(f"{clean(str(name))} key={_r(k)} payload={_r(p)}")
                 result = await fn(*a, **kw)
                 self._log.record(name, p, k)
                 self._end(tok)
@@ -296,6 +372,12 @@ class ConformanceReport:
     @property
     def passed(self) -> bool:
         return not self.findings
+
+    @property
+    def vacuous(self) -> bool:
+        """True when no crash scenario ran at all (no effects recorded, or no inputs):
+        ``passed`` is then true only because nothing was tested."""
+        return self.crash_points == 0
 
     def __bool__(self) -> bool:
         return self.passed
@@ -377,9 +459,20 @@ def _snapshot(agent: Any) -> Any:
     return None
 
 
+def _fresh(inputs: Sequence[Any]) -> List[Any]:
+    """A private copy of the inputs for one process life: a ``step()`` that mutates its
+    input must not poison later scenarios (a real restart re-reads the input)."""
+    try:
+        return copy.deepcopy(list(inputs))
+    except Exception:   # not copyable (locks, generators): share, as before
+        return list(inputs)
+
+
 def _run(factory: Callable[[Context], Any], inputs: Sequence[Any], ctx: Context) -> Any:
     agent = factory(ctx)
-    for item in inputs:
+    if not callable(getattr(agent, "step", None)):
+        raise TypeError(f"factory must return an object with a step(input) method, got {type(agent).__name__}")
+    for item in _fresh(inputs):
         agent.step(item)
     return agent
 
@@ -422,14 +515,25 @@ _SWALLOWED = "caught InjectedCrash and kept running; a real crash cannot be caug
 
 
 def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
-          crashes: Sequence[Crash], isolate: bool = True) -> _Outcome:
+          crashes: Sequence[Crash], isolate: bool = True, strict_dirs: bool = False,
+          trace: Optional[List[str]] = None) -> _Outcome:
     """Run one scenario: crash once per entry in ``crashes``, then resume clean."""
     sid = _scenario_id(run_id, crashes)
     first = crashes[0][0]
     log = EffectLog()
     store: Dict[str, Any] = {}
-    fs = SimFS()
+    fs = SimFS(dir_durability=strict_dirs)
     out = _Outcome(log=log)
+
+    def lane(title: str) -> Optional[List[str]]:
+        if trace is None:
+            return None
+        trace.append(title)
+        return []
+
+    def flush(lines: Optional[List[str]]) -> None:
+        if trace is not None and lines is not None:
+            trace.extend("  " + ln for ln in lines)
 
     def fail(kind: str, detail: str) -> _Outcome:
         out.error = Finding(kind, first, detail, sid, crashes[0][1], tuple(crashes))
@@ -438,10 +542,18 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
     for life, (k, when) in enumerate(crashes, 1):
         if life > 1:
             store = _survive(store, isolate)
-        ctx = Context(sid, log, crash_at=k, store=store, crash_when=when, fs=fs)
+        lines = lane(f"process life {life}: killed {when} point #{k}")
+        ctx = Context(sid, log, crash_at=k, store=store, crash_when=when, fs=fs, trace=lines)
         try:
             _run(factory, inputs, ctx)
         except InjectedCrash:
+            if lines:
+                lines[-1] += "   <-- KILLED " + {AFTER: "right after this committed", BEFORE: "BEFORE this committed",
+                                                  TORN: "after this write, tail torn"}[when]
+            flush(lines)
+            if trace is not None:
+                trace.append("  -- process dies here; "
+                             + ("un-fsynced data is torn" if when == TORN else "un-fsynced file data is lost"))
             if life == 1:
                 out.first_life_effects = len(log)
             fs.power_loss(torn=(when == TORN))
@@ -449,7 +561,9 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
                 return fail("crash_swallowed", f"process life {life} {_SWALLOWED}")
             continue
         except Exception as exc:  # noqa: BLE001 - reported, not hidden
+            flush(lines)
             return fail("subject_error", f"process life {life} raised {type(exc).__name__}: {_r(exc)}")
+        flush(lines)
         if ctx.crashed:
             return fail("crash_swallowed", f"process life {life} {_SWALLOWED}")
         out.unreached = (
@@ -461,7 +575,8 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
         break
     before = len(log)
     store = _survive(store, isolate)
-    ctx = Context(sid, log, store=store, fs=fs)
+    lines = lane("resume (clean process, no crash)")
+    ctx = Context(sid, log, store=store, fs=fs, trace=lines)
     try:
         agent = _run(factory, inputs, ctx)
         out.final_state = _snapshot(agent)
@@ -469,6 +584,7 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
         fail("resume_crashed", "resume run raised InjectedCrash again")
     except Exception as exc:  # noqa: BLE001
         fail("subject_error", f"resume raised {type(exc).__name__}: {_r(exc)}")
+    flush(lines)
     out.last_life_effects = len(log) - before
     out.last_life_kinds = list(ctx.points)
     return out
@@ -558,11 +674,26 @@ class _Baseline:
     kinds: List[str]
 
 
-def _menu(kinds: Sequence[str], modes: Sequence[str], torn: bool) -> List[Crash]:
+def _thin(points: List[int], sample: Optional[int], skipped: Optional[List[int]]) -> List[int]:
+    """Keep ``sample`` evenly spaced points (always the first and the last)."""
+    if sample is None or len(points) <= sample:
+        return points
+    if sample == 1:
+        keep = [points[-1]]
+    else:
+        keep = sorted({points[round(i * (len(points) - 1) / (sample - 1))] for i in range(sample)})
+    if skipped is not None:
+        skipped[0] += len(points) - len(keep)
+    return keep
+
+
+def _menu(kinds: Sequence[str], modes: Sequence[str], torn: bool,
+          sample: Optional[int] = None, skipped: Optional[List[int]] = None) -> List[Crash]:
     """Crash options for a process life whose crash points have these kinds."""
-    out: List[Crash] = [(k, when) for when in modes for k in range(1, len(kinds) + 1)]
+    every = list(range(1, len(kinds) + 1))
+    out: List[Crash] = [(k, when) for when in modes for k in _thin(every, sample, skipped)]
     if torn:
-        out += [(k, TORN) for k in range(1, len(kinds) + 1) if kinds[k - 1] == "fs.write"]
+        out += [(k, TORN) for k in _thin([k for k in every if kinds[k - 1] == "fs.write"], sample, skipped)]
     return out
 
 
@@ -580,8 +711,10 @@ def _explore(
     strict_keyless: bool,
     only: Optional[Sequence[Tuple[Crash, ...]]] = None,
     stop: Optional[Callable[[Finding], bool]] = None,
+    sample: Optional[int] = None,
 ) -> ConformanceReport:
     report = ConformanceReport()
+    skipped = [0]
     if not base.kinds:
         report.warnings.append("subject recorded no effects through ctx.effect(); nothing was tested")
         return report
@@ -595,7 +728,8 @@ def _explore(
             )
 
     # breadth-first: all single crashes first, so a cap trims the deepest scenarios
-    queue: List[Tuple[Crash, ...]] = list(only) if only is not None else [(c,) for c in _menu(base.kinds, modes, torn)]
+    first_level = [(c,) for c in _menu(base.kinds, modes, torn, sample, skipped)]
+    queue: List[Tuple[Crash, ...]] = list(only) if only is not None else first_level
     truncated = False
     dropped = 0   # children never enqueued because of the cap
     i = 0
@@ -625,11 +759,16 @@ def _explore(
         if out.error is not None:
             continue
         if only is None and len(crashes) < max_crashes and not out.unreached:
-            for child in _menu(out.last_life_kinds, modes, torn):
+            for child in _menu(out.last_life_kinds, modes, torn, sample, skipped):
                 if max_scenarios is not None and len(queue) >= max_scenarios:
                     dropped += 1
                 else:
                     queue.append(crashes + (child,))
+    if skipped[0]:
+        report.warnings.append(
+            f"sample={sample}: {skipped[0]} crash point(s) were NOT tested (evenly spaced subset only); "
+            "a pass is not a proof"
+        )
     if truncated or dropped:
         report.warnings.append(
             f"stopped at max_scenarios={max_scenarios}; at least {len(queue) - i + dropped} more scenario(s) were not run"
@@ -637,7 +776,9 @@ def _explore(
     return report
 
 
-def _validate(max_crashes: Any, max_scenarios: Any) -> None:
+def _validate(max_crashes: Any, max_scenarios: Any, sample: Any = None) -> None:
+    if sample is not None and (not isinstance(sample, int) or isinstance(sample, bool) or sample < 1):
+        raise ValueError("sample must be a positive int or None")
     if not isinstance(max_crashes, int) or isinstance(max_crashes, bool) or max_crashes < 1:
         raise ValueError("max_crashes must be an int >= 1")
     if max_scenarios is not None and (not isinstance(max_scenarios, int) or isinstance(max_scenarios, bool) or max_scenarios < 1):
@@ -659,17 +800,45 @@ def _conform(
     strict_keyless: bool,
     only: Optional[Sequence[Tuple[Crash, ...]]] = None,
     stop: Optional[Callable[[Finding], bool]] = None,
+    strict_dirs: bool = False,
+    sample: Optional[int] = None,
+    check_determinism: bool = False,
 ) -> ConformanceReport:
     modes = (AFTER, BEFORE) if crash_before else (AFTER,)
-    bctx = Context(run_id, EffectLog())
+    bctx = Context(run_id, EffectLog(), fs=SimFS(dir_durability=strict_dirs))
     baseline_agent = _run(factory, inputs, bctx)
     base = _Baseline(bctx.effects.effects, _snapshot(baseline_agent), list(bctx.points))
-    return _explore(
-        run_id, base, lambda crashes: _play(factory, inputs, run_id, crashes, isolate_store),
+    report = _explore(
+        run_id, base, lambda crashes: _play(factory, inputs, run_id, crashes, isolate_store, strict_dirs),
         modes=modes, torn=torn_writes, max_crashes=max_crashes, max_scenarios=max_scenarios,
         check_payloads=check_payloads, payload_key=payload_key, strict_keyless=strict_keyless,
-        only=only, stop=stop,
+        only=only, stop=stop, sample=sample,
     )
+    if check_determinism and base.kinds:
+        note = _nondeterminism(factory, inputs, run_id, base, strict_dirs)
+        if note:
+            report.warnings.append(note)
+    return report
+
+
+def _nondeterminism(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
+                    base: "_Baseline", strict_dirs: bool) -> Optional[str]:
+    """Run the crash-free baseline a second time under another run id; a subject whose
+    crash points or keys change between identical runs makes crash numbers meaningless."""
+    other = f"{run_id}~det"
+    ctx = Context(other, EffectLog(), fs=SimFS(dir_durability=strict_dirs))
+    try:
+        _run(factory, inputs, ctx)
+    except Exception as exc:  # noqa: BLE001 - only a warning
+        return f"second crash-free baseline run raised {type(exc).__name__}: {_r(exc)} - is the subject deterministic?"
+
+    def keys(es: Sequence[Effect], rid: str) -> List[str]:
+        return [str(e.key).replace(rid, "<run>") if e.key is not None else "" for e in es]
+
+    if ctx.points != base.kinds or keys(ctx.effects.effects, other) != keys(base.effects, run_id):
+        return ("two identical crash-free runs issued different crash points or keys - the subject looks "
+                "nondeterministic (time, randomness, dict/set order?), so crash point numbers may not line up")
+    return None
 
 
 def conform(
@@ -688,6 +857,9 @@ def conform(
     thorough: bool = False,
     minimize: bool = False,
     fail_fast: bool = False,
+    strict_dirs: bool = False,
+    sample: Optional[int] = None,
+    check_determinism: bool = False,
 ) -> ConformanceReport:
     """Run ``factory(ctx) -> subject`` to completion, then re-run it crashing at
     every crash point and compare against the baseline.
@@ -711,6 +883,13 @@ def conform(
     * ``minimize`` - for each kind of finding, shrink the inputs (delta debugging)
       and the crash list to the smallest reproduction; see ``report.repros``.
     * ``fail_fast`` - stop at the first finding.
+    * ``strict_dirs`` - stricter file-name model: creates, renames and removes are
+      lost on a power cut until ``ctx.fs.fsync_dir(dir)`` (not part of ``thorough``).
+    * ``check_determinism`` - run the crash-free baseline a second time (under another
+      run id) and warn if crash points or keys differ; runs your tools once more, so
+      it is off by default and on in ``thorough``.
+    * ``sample`` - test only this many evenly spaced crash points per crash kind and
+      level (huge inputs); the report warns how many points were skipped.
     * ``check_payloads`` / ``payload_key`` - opt in to ``effect_diverged``: compare
       the payload of each keyed effect issued after a crash with the baseline's.
       Off by default (request ids and timestamps legitimately differ). Passing
@@ -723,19 +902,21 @@ def conform(
     ``ctx.store`` / ``ctx.fs`` start empty. Key any other durable state by
     ``ctx.run_id``.
     """
-    _validate(max_crashes, max_scenarios)
+    _validate(max_crashes, max_scenarios, sample)
     if check_payloads is None:
         check_payloads = payload_key is not None
     if thorough:
         crash_before, torn_writes, strict_keyless = True, True, True
         max_crashes = max(max_crashes, 2)
+        check_determinism = True
     inputs = list(inputs)
     opts: Dict[str, Any] = dict(
         crash_before=crash_before, max_crashes=max_crashes, max_scenarios=max_scenarios,
         check_payloads=check_payloads, payload_key=payload_key, isolate_store=isolate_store,
-        torn_writes=torn_writes, strict_keyless=strict_keyless,
+        torn_writes=torn_writes, strict_keyless=strict_keyless, strict_dirs=strict_dirs, sample=sample,
     )
-    report = _conform(factory, inputs, run_id, **opts, stop=(lambda f: True) if fail_fast else None)
+    report = _conform(factory, inputs, run_id, **opts, stop=(lambda f: True) if fail_fast else None,
+                      check_determinism=check_determinism)
     if minimize and report.findings:
         report.repros = _minimize(factory, inputs, run_id, report, opts)
     return report
@@ -762,12 +943,64 @@ def replay(
     options.pop("thorough", None)
     opts: Dict[str, Any] = dict(
         crash_before=False, max_crashes=len(crashes), max_scenarios=None, check_payloads=None, payload_key=None,
-        isolate_store=True, torn_writes=False, strict_keyless=False,
+        isolate_store=True, torn_writes=False, strict_keyless=False, strict_dirs=False, sample=None,
     )
     opts.update(options)
     if opts["check_payloads"] is None:
         opts["check_payloads"] = opts["payload_key"] is not None
     return _conform(factory, list(inputs), run_id, **opts, only=[crashes])
+
+
+def explain(
+    factory: Callable[[Context], Any],
+    inputs: Iterable[Any],
+    crashes: Sequence[Tuple[int, str]],
+    run_id: str = "run",
+    **options: Any,
+) -> str:
+    """Human-readable timeline of ONE scenario: every crash point each process life
+    passed (effects with key and payload, file operations), where it was killed, what
+    the baseline did, and what the checks concluded. Pass ``Finding.crashes``.
+
+    Accepts ``check_payloads``, ``payload_key``, ``strict_keyless``, ``strict_dirs``
+    and ``isolate_store`` like ``conform``.
+    """
+    crashes = tuple((int(k), w) for k, w in crashes)
+    if not crashes or any(w not in _WHENS or k < 1 for k, w in crashes):
+        raise ValueError(f"crashes must be a non-empty list of (point>=1, one of {_WHENS})")
+    inputs = list(inputs)
+    strict_dirs = bool(options.get("strict_dirs", False))
+    payload_key = options.get("payload_key")
+    check_payloads = options.get("check_payloads")
+    if check_payloads is None:
+        check_payloads = payload_key is not None
+    bctx = Context(run_id, EffectLog(), fs=SimFS(dir_durability=strict_dirs))
+    base_agent = _run(factory, inputs, bctx)
+    base = _Baseline(bctx.effects.effects, _snapshot(base_agent), list(bctx.points))
+    lines: List[str] = []
+    out = _play(factory, inputs, run_id, crashes, options.get("isolate_store", True), strict_dirs, trace=lines)
+    sid = _scenario_id(run_id, crashes)
+    rep = ConformanceReport()
+    if out.error is not None:
+        rep.findings.append(out.error)
+    else:
+        _check(rep, sid, crashes[0][0], out, base.effects, base.state, check_payloads, payload_key,
+               bool(options.get("strict_keyless", False)), crashes)
+    head = [f"scenario {sid}: " + ", then ".join(f"crash {w} point #{k}" for k, w in crashes)]
+    head.append(f"baseline (no crash): {len(base.kinds)} crash point(s) ({', '.join(sorted(set(base.kinds)))})")
+    head.append(f"baseline keyed effects: {_r([e.key for e in base.effects if e.key is not None])}")
+    tail = [f"effects that happened across all lives: {_r([e.key if e.key is not None else e.kind for e in out.log.effects])}"]
+    if rep.findings:
+        tail += [f"finding [{f.kind}]: {f.detail}" for f in rep.findings]
+    else:
+        tail.append("no finding for this scenario")
+    tail += [f"warning: {w}" for w in rep.warnings]
+    return clean_block("\n".join(head + lines + tail))
+
+
+def clean_block(text: str) -> str:
+    """``clean`` for multi-line text (keeps real newlines)."""
+    return "\n".join(clean(line) for line in text.split("\n"))
 
 
 def _ddmin(items: List[Any], test: Callable[[List[Any]], bool], budget: List[int]) -> List[Any]:

@@ -17,9 +17,12 @@ def conform():
             conform(make_agent, inputs, crash_before=True, max_crashes=2)
     """
 
-    def run(factory, inputs, run_id: str = "run", **options) -> core.ConformanceReport:
+    def run(factory, inputs, run_id: str = "run", allow_vacuous: bool = False, **options) -> core.ConformanceReport:
         report = core.conform(factory, inputs, run_id=run_id, **options)
         assert report.passed, str(report)
+        assert allow_vacuous or not report.vacuous, (
+            "no crash scenario ran (the subject recorded no effects through ctx.effect / ctx.tool / ctx.fs, "
+            "or there were no inputs), so nothing was tested; pass allow_vacuous=True to accept that.\n" + str(report))
         return report
 
     return run

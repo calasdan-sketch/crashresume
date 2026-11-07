@@ -32,17 +32,41 @@ class _NoStore(dict):
     get = setdefault = update = pop = items = keys = values = _no  # type: ignore[assignment]
 
 
+def load_ledger(path: str, repair: bool = False) -> List[Dict[str, Any]]:
+    """Records of an effect ledger. A torn final line (no trailing newline: the writer was
+    killed mid-append by a timeout) is dropped, and cut from the file when ``repair`` is
+    set so the next append starts on a clean line. A bad line anywhere else raises
+    ``ValueError`` (fail closed)."""
+    if not os.path.exists(path):
+        return []
+    with open(path, "rb") as fh:
+        raw = fh.read()
+    *complete, tail = raw.split(b"\n")
+    out: List[Dict[str, Any]] = []
+    for i, chunk in enumerate(complete, 1):
+        if not chunk.strip():
+            continue
+        try:
+            d = json.loads(chunk.decode("utf-8"))
+            if not isinstance(d, dict) or not {"kind", "payload", "key"} <= set(d):
+                raise ValueError("not a ledger record")
+        except ValueError:
+            raise ValueError(f"effect ledger {path!r} is corrupt at line {i}") from None
+        out.append(d)
+    if tail and repair:
+        with open(path, "r+b") as fh:
+            fh.truncate(len(raw) - len(tail))
+    return out
+
+
 class _FileLog(EffectLog):
     """Effect ledger on disk, fsynced per record, reloaded by every process life."""
 
     def __init__(self, path: str) -> None:
         super().__init__()
         self._path = path
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as fh:
-                for line in fh:
-                    d = json.loads(line)
-                    super().record(d["kind"], d["payload"], d["key"])
+        for d in load_ledger(path, repair=True):
+            super().record(d["kind"], d["payload"], d["key"])
 
     def record(self, kind: str, payload: Any = None, key: Optional[str] = None) -> Any:
         if key is not None and not isinstance(key, (str, int)):
