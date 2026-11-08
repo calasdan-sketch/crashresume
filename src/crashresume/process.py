@@ -104,12 +104,12 @@ def conform_process(
     env["PYTHONUTF8"] = "1"
     counter = itertools.count(1)
 
-    def life(sid: str, crash: Optional[Crash]) -> Tuple[Optional[int], str]:
+    def life(sid: str, crash: Optional[Crash], generation: int = 1) -> Tuple[Optional[int], str]:
         """Run one process life. Returns (returncode, stderr tail); returncode None = timeout."""
         d = os.path.join(root, _SAFE.sub("_", sid))
         os.makedirs(d, exist_ok=True)
         spec_path = os.path.join(root, f"spec-{next(counter)}.json")
-        spec: Dict[str, Any] = {"target": target, "inputs": inputs, "dir": d, "run_id": sid}
+        spec: Dict[str, Any] = {"target": target, "inputs": inputs, "dir": d, "run_id": sid, "generation": generation}
         if crash:
             spec["crash_at"], spec["when"] = crash
         with open(spec_path, "w", encoding="utf-8") as fh:
@@ -144,7 +144,7 @@ def conform_process(
             return out
 
         for n, crash in enumerate(crashes, 1):
-            rc, tail = life(sid, crash)
+            rc, tail = life(sid, crash, n)
             if rc is None:
                 return fail("subject_hang", f"process life {n} exceeded {timeout}s and was killed")
             if rc in DIED:
@@ -159,7 +159,7 @@ def conform_process(
                 out.first_life_effects = len(_read_ledger(ledger))
             break
         before = len(_read_ledger(ledger))
-        rc, tail = life(sid, None)
+        rc, tail = life(sid, None, len(crashes) + 1)
         if rc is None:
             return fail("subject_hang", f"resume exceeded {timeout}s and was killed")
         if rc != 0:

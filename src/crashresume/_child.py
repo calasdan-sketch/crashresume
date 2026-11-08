@@ -120,7 +120,8 @@ def main(argv: List[str]) -> int:
     d = spec["dir"]
     crash_at = spec.get("crash_at")
     ctx = _ProcContext(spec["run_id"], _FileLog(os.path.join(d, "effects.jsonl")), crash_at=crash_at,
-                       store=_NoStore(), crash_when=spec.get("when", AFTER), fs=RealFS(os.path.join(d, "data")))
+                       store=_NoStore(), crash_when=spec.get("when", AFTER), fs=RealFS(os.path.join(d, "data")),
+                       generation=int(spec.get("generation", 1)))
     try:
         agent = factory(ctx)
         for item in spec["inputs"]:

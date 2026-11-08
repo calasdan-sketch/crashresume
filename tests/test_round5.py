@@ -754,3 +754,28 @@ def test_every_mutant_still_applies_to_the_source():
     for name, old, new, why in mod.MUTANTS:
         text = open(os.path.join(ROOT, "src", "crashresume", name), encoding="utf-8").read()
         assert text.count(old) == 1 and old != new, f"mutant no longer applies: {why}"
+
+
+def test_process_mode_hands_out_generations(tmp_path):
+    mod = tmp_path / "gen.py"
+    mod.write_text("class A:\n    def __init__(self, ctx): self.ctx = ctx\n"
+                   "    def step(self, j): self.ctx.effect('gen', self.ctx.generation, key=j)\n"
+                   "def make(ctx): return A(ctx)\n", encoding="utf-8")
+    rep = conform_process(f"{mod}:make", ["a"], check_payloads=True)
+    # baseline is generation 1; the resume after one crash is generation 2, so its payload differs from the baseline's
+    assert any(f.kind == "effect_diverged" for f in rep.findings), str(rep)
+
+
+def test_failure_injection_corpora_match_the_committed_numbers():
+    corpus = _corpus()
+    committed = json.load(open(os.path.join(ROOT, "benchmarks", "RESULTS.json"), encoding="utf-8"))
+    for key, cases, opt in (("faults", corpus.corpus_faults(), "faults"), ("stale", corpus.corpus_stale(), "stale_worker")):
+        base, full = (committed[key][label] for label in ("thorough (crashes only)", f"thorough + {opt}"))
+        broken = [c for c in cases if c.expected]
+        assert base["recall"] == 0.0 and full["recall"] == 1.0 and full["precision"] == 1.0 and not full["false_alarms"]
+        for c in cases:            # re-run the cheap half live: the options find exactly what the labels say
+            rep = conform(c.factory, c.inputs, thorough=True, **{opt: True})
+            assert bool(rep.findings) == bool(c.expected), (c.name, str(rep))
+            if c.expected:
+                assert {f.kind for f in rep.findings} & c.expected, c.name
+        assert len(broken) == full["tp"]
