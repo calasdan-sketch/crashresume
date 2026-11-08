@@ -16,6 +16,20 @@ Directory-durability corpus (4 agents, 2 broken: a new name is not durable until
 | thorough (names always durable) | 0.000 | 1.000 | 1992 | dirs_rename_no_dir_fsync, dirs_create_no_dir_fsync |
 | thorough + strict_dirs | 1.000 | 1.000 | 2232 | none |
 
+Failure-injection corpus, retries after a timeout or a refusal (faults=True): 7 agents, 4 broken:
+
+| strategy | recall | precision | crash points (total) | missed bugs |
+|---|---|---|---|---|
+| thorough (crashes only) | 0.000 | 1.000 | 462 | faults_retry_blind, faults_retry_new_key, faults_swallow_and_checkpoint, faults_journal_retry_welds |
+| thorough + faults | 1.000 | 1.000 | 516 | none |
+
+Failure-injection corpus, workers that wake after their replacement finished (stale_worker=True): 5 agents, 2 broken:
+
+| strategy | recall | precision | crash points (total) | missed bugs |
+|---|---|---|---|---|
+| thorough (crashes only) | 0.000 | 1.000 | 138 | stale_unfenced_worker, stale_epoch_check_only |
+| thorough + stale_worker | 1.000 | 1.000 | 153 | none |
+
 Process mode (real SIGKILL, fresh interpreter per life) on the cases a simulator cannot judge:
 
 | agent | truth | simulated (default) | simulated (thorough) | real kill (default) | real-kill scenarios |

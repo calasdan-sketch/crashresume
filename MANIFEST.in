@@ -3,3 +3,4 @@ recursive-include benchmarks *.py *.md *.json
 recursive-include examples *.py
 recursive-include tests *.py
 global-exclude __pycache__ *.py[cod]
+recursive-include tests/golden *

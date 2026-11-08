@@ -7,6 +7,7 @@ that real agent code has, so the benchmark measures *detection*, not agent size.
 """
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, FrozenSet, List
 
@@ -562,4 +563,229 @@ def corpus_dirs() -> List[Case]:
         Case("dirs_rename_then_fsync_dir", DirsRenameThenFsyncDir, ok, "explicit fsync_dir after rename"),
         Case("dirs_rename_no_dir_fsync", DirsRenameNoDirFsync, bad, "fsynced temp file renamed, directory never synced"),
         Case("dirs_create_no_dir_fsync", DirsCreateNoDirFsync, bad, "fsynced new file whose name is not durable"),
+    ]
+
+
+# -- failures that are not crashes (faults=True) and stale workers (stale_worker=True): a third small
+#    corpus, so the 24-agent and directory numbers stay comparable across versions ----------------
+class _Charger:
+    """Base: charge each input once; subclasses differ in how they react to errors and to a replacement worker."""
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+        _done(ctx)
+
+    def state(self):
+        return sorted(self.ctx.store["done"])
+
+    def step(self, item):
+        if item in self.ctx.store["done"]:
+            return
+        self.charge(item)
+        self.ctx.store["done"].append(item)
+
+    def charge(self, item):
+        raise NotImplementedError
+
+
+class FaultsRetryChecksKey(_Charger):
+    """Retries, but first asks whether the earlier try already went through."""
+
+    def charge(self, item):
+        for _ in range(3):
+            if f"pay:{item}" in self.ctx.effects.keys():
+                return
+            try:
+                self.ctx.effect("pay", item, key=f"pay:{item}")
+                return
+            except OSError:
+                continue
+
+
+class FaultsLetItCrash(_Charger):
+    """No retry at all: an error ends the run, and the restart reconciles."""
+
+    def charge(self, item):
+        if f"pay:{item}" not in self.ctx.effects.keys():
+            self.ctx.effect("pay", item, key=f"pay:{item}")
+
+
+class _Journal:
+    """Append-only journal of finished items. Restart repairs a torn tail; ``retry_repairs`` says whether the
+    live retry path (after a failed append, with the process still running) repairs it too."""
+
+    retry_repairs = False
+
+    def __init__(self, ctx):
+        self.ctx = ctx
+        self._repair()
+
+    def _lines(self):
+        fs = self.ctx.fs
+        return fs.read_text("journal").split("\n") if fs.exists("journal") else []
+
+    def _items(self):
+        out = []
+        for line in self._lines():
+            try:
+                out.append(json.loads(line))
+            except ValueError:
+                continue
+        return out
+
+    def _repair(self):
+        complete = [ln for ln in self._lines()[:-1] if ln]   # the last piece has no newline after it: torn or empty
+        text = "".join(ln + "\n" for ln in complete)
+        fs = self.ctx.fs
+        if fs.exists("journal") and fs.read_text("journal") != text:
+            fs.write_atomic("journal", text)
+
+    def step(self, item):
+        if item in self._items():
+            return
+        for _ in range(3):
+            try:
+                self.ctx.fs.write("journal", json.dumps(item) + "\n", append=True)
+                self.ctx.fs.fsync("journal")
+                return
+            except OSError:
+                if self.retry_repairs:
+                    self._repair()
+
+    def state(self):
+        return sorted(self._items())
+
+
+class FaultsJournalRepairsOnRetry(_Journal):
+    retry_repairs = True
+
+
+class FaultsJournalRetryWelds(_Journal):
+    """Repairs a torn tail on restart but not before a live retry: the retried entry is welded to the half line."""
+
+
+class StaleFencedWorker(_Charger):
+    """Reconciles, and passes a fencing token so a stale worker is rejected."""
+
+    def charge(self, item):
+        if f"pay:{item}" not in self.ctx.effects.keys():
+            self.ctx.effect("pay", item, key=f"pay:{item}", fence=self.ctx.generation)
+
+
+class FaultsRetryBlind(_Charger):
+    """Retries on any error without asking whether the first try committed (timeout -> double charge)."""
+
+    def charge(self, item):
+        if f"pay:{item}" in self.ctx.effects.keys():   # reconciles on restart, but not inside the retry loop
+            return
+        for _ in range(3):
+            try:
+                self.ctx.effect("pay", item, key=f"pay:{item}")
+                return
+            except OSError:
+                continue
+
+
+class FaultsRetryNewKey(_Charger):
+    """Retries under a fresh key (a request id), so the provider cannot recognise the repeat."""
+
+    def charge(self, item):
+        if any(k.startswith(f"pay:{item}:") for k in self.ctx.effects.keys()):
+            return
+        for attempt in range(3):
+            try:
+                self.ctx.effect("pay", item, key=f"pay:{item}:{attempt}")
+                return
+            except OSError:
+                continue
+
+
+class FaultsSwallowAndCheckpoint(_Charger):
+    """Logs and ignores the error, then marks the item done (refusal -> the work is silently lost)."""
+
+    def charge(self, item):
+        try:
+            if f"pay:{item}" not in self.ctx.effects.keys():
+                self.ctx.effect("pay", item, key=f"pay:{item}")
+        except OSError:
+            pass
+
+
+class StaleUnfencedWorker(_Charger):
+    """Reconciles against the ledger but has no fencing token: a worker that wakes late writes again."""
+
+    def charge(self, item):
+        if f"pay:{item}" not in self.ctx.effects.keys():
+            self.ctx.effect("pay", item, key=f"pay:{item}")
+
+
+class StaleEpochCheckOnly(_Charger):
+    """Checks a lease epoch in the store before the call; a stall between check and call defeats it."""
+
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        ctx.store["epoch"] = ctx.store.get("epoch", 0) + 1
+        self.epoch = ctx.store["epoch"]
+
+    def state(self):
+        return sorted(self.ctx.store["done"])
+
+    def charge(self, item):
+        if self.ctx.store["epoch"] != self.epoch:
+            raise RuntimeError("lease lost")
+        if f"pay:{item}" not in self.ctx.effects.keys():
+            self.ctx.effect("pay", item, key=f"pay:{item}")
+
+
+class StaleProviderDedup(_Charger):
+    """No fencing token, but the resource honours the idempotency key (dedupe=True): a late duplicate is ignored."""
+
+    def charge(self, item):
+        self.ctx.effect("pay", item, key=f"pay:{item}", dedupe=True)
+
+    def step(self, item):   # the checkpoint must also tolerate a second writer (a set, not an append)
+        self.charge(item)
+        if item not in self.ctx.store["done"]:
+            self.ctx.store["done"].append(item)
+
+
+class StaleFencedTool(_Charger):
+    """The same, through ctx.tool(..., fence=...)."""
+
+    def __init__(self, ctx):
+        super().__init__(ctx)
+        self.pay = ctx.tool(lambda item: None, kind="pay", key=lambda item: f"pay:{item}", fence=ctx.generation)
+
+    def charge(self, item):
+        if f"pay:{item}" not in self.ctx.effects.keys():
+            self.pay(item)
+
+
+def corpus_faults() -> List[Case]:
+    ok: FrozenSet[str] = frozenset()
+    return [
+        Case("faults_retry_checks_key", FaultsRetryChecksKey, ok, "retry asks the ledger first"),
+        Case("faults_let_it_crash", FaultsLetItCrash, ok, "no retry; restart reconciles"),
+        Case("faults_retry_blind", FaultsRetryBlind, frozenset({"effect_replayed"}),
+             "retry after a timeout repeats a committed charge"),
+        Case("faults_retry_new_key", FaultsRetryNewKey, frozenset({"effect_replayed"}),
+             "retry under a fresh key defeats idempotency"),
+        Case("faults_swallow_and_checkpoint", FaultsSwallowAndCheckpoint, frozenset({"effect_lost"}),
+             "ignored refusal, item marked done"),
+        Case("faults_journal_repairs_on_retry", FaultsJournalRepairsOnRetry, ok,
+             "disk full mid-append, retry repairs the tail first"),
+        Case("faults_journal_retry_welds", FaultsJournalRetryWelds, frozenset({"resume_diverged"}),
+             "disk full mid-append, retried entry welded to the half line"),
+    ]
+
+
+def corpus_stale() -> List[Case]:
+    ok: FrozenSet[str] = frozenset()
+    return [
+        Case("stale_fenced_worker", StaleFencedWorker, ok, "fencing token rejects the stale worker"),
+        Case("stale_fenced_tool", StaleFencedTool, ok, "same, through ctx.tool"),
+        Case("stale_provider_dedup", StaleProviderDedup, ok, "the resource ignores a repeated idempotency key"),
+        Case("stale_unfenced_worker", StaleUnfencedWorker, frozenset({"stale_worker"}), "no fencing token"),
+        Case("stale_epoch_check_only", StaleEpochCheckOnly, frozenset({"stale_worker"}),
+             "check-then-act race with a stalled worker"),
     ]

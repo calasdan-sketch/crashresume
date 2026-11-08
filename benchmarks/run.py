@@ -25,7 +25,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent / "src"))
 
-from corpus import corpus, corpus_dirs  # noqa: E402
+from corpus import corpus, corpus_dirs, corpus_faults, corpus_stale  # noqa: E402
 
 from crashresume import conform, conform_process, replay  # noqa: E402
 from crashresume.core import Context, EffectLog, _run  # noqa: E402
@@ -154,6 +154,22 @@ def main(argv):
         sc["crash_points_total"] = sum(r_["crash_points"] for r_ in rows)
         sc["rows"] = rows
         result["strict_dirs"][label] = sc
+    flt, stl = corpus_faults(), corpus_stale()
+    result["faults"], result["stale"] = {}, {}
+    for key, cases_, label_kw in (
+            ("faults", flt, (("thorough (crashes only)", {}), ("thorough + faults", {"faults": True}))),
+            ("stale", stl, (("thorough (crashes only)", {}), ("thorough + stale_worker", {"stale_worker": True})))):
+        for label, kw in label_kw:
+            rows = []
+            for c in cases_:
+                rep = conform(c.factory, c.inputs, run_id=f"b-{key}-{c.name}", thorough=True, **kw)
+                rows.append({"case": c.name, "expected": sorted(c.expected), "kinds": sorted({f.kind for f in rep.findings}),
+                             "flagged": bool(rep.findings), "detected": detects(rep, c.expected) if c.expected else None,
+                             "crash_points": rep.crash_points})
+            sc = score(rows)
+            sc["crash_points_total"] = sum(r_["crash_points"] for r_ in rows)
+            sc["rows"] = rows
+            result[key][label] = sc
     result["process_mode"] = run_process()
     text = json.dumps(result, indent=2, sort_keys=True) + "\n"
     with open(HERE / "RESULTS.json", "w", encoding="utf-8", newline="\n") as fh:
@@ -178,6 +194,15 @@ def main(argv):
     for label, s in result["strict_dirs"].items():
         md.append(f"| {label} | {s['recall']:.3f} | {s['precision']:.3f} | {s['crash_points_total']} | "
                   f"{', '.join(s['missed']) or 'none'} |")
+    for key, cases_, title in (
+            ("faults", flt, "retries after a timeout or a refusal (faults=True)"),
+            ("stale", stl, "workers that wake after their replacement finished (stale_worker=True)")):
+        nb_ = sum(1 for c in cases_ if c.expected)
+        md += ["", f"Failure-injection corpus, {title}: {len(cases_)} agents, {nb_} broken:",
+               "", "| strategy | recall | precision | crash points (total) | missed bugs |", "|---|---|---|---|---|"]
+        for label, s_ in result[key].items():
+            md.append(f"| {label} | {s_['recall']:.3f} | {s_['precision']:.3f} | {s_['crash_points_total']} | "
+                      f"{', '.join(s_['missed']) or 'none'} |")
     md += ["", "Process mode (real SIGKILL, fresh interpreter per life) on the cases a simulator cannot judge:", "",
            "| agent | truth | simulated (default) | simulated (thorough) | real kill (default) | real-kill scenarios |",
            "|---|---|---|---|---|---|"]

@@ -84,13 +84,15 @@ class SimFS:
         self._begin: Callable[[str], Any] = lambda kind: None
         self._end: Callable[[Any, str], None] = lambda armed, kind: None
         self._note: Callable[[str], None] = lambda text: None
+        self._short: Callable[[], bool] = lambda: False   # True while a disk-full fault stores half of a write
         self.ops: List[str] = []  # human-readable trace of mutating calls (for debugging)
 
     # -- wiring ---------------------------------------------------------
     def _bind(self, begin: Callable[[str], Any], end: Callable[[Any, str], None],
-              note: Optional[Callable[[str], None]] = None) -> None:
+              note: Optional[Callable[[str], None]] = None, short: Optional[Callable[[], bool]] = None) -> None:
         self._begin, self._end = begin, end
         self._note = note or (lambda text: None)
+        self._short = short or (lambda: False)
 
     # -- reads (never crash points) -------------------------------------
     def exists(self, path: str) -> bool:
@@ -115,6 +117,8 @@ class SimFS:
         p, d = _norm(path), _b(data)
         self._note(f"write {p} ({len(d)}B{' append' if append else ''})")
         tok = self._begin("fs.write")
+        if self._short():
+            d = d[: len(d) // 2]   # disk-full fault: only half reaches the file before the error
         f = self._files.get(p)
         if f is None:
             f = self._files[p] = _File()
@@ -219,9 +223,10 @@ class RealFS:
         self._note: Callable[[str], None] = lambda text: None
 
     def _bind(self, begin: Callable[[str], Any], end: Callable[[Any, str], None],
-              note: Optional[Callable[[str], None]] = None) -> None:
+              note: Optional[Callable[[str], None]] = None, short: Optional[Callable[[], bool]] = None) -> None:
         self._begin, self._end = begin, end
         self._note = note or (lambda text: None)
+        self._short = short or (lambda: False)
 
     def _path(self, path: str) -> str:
         full = os.path.abspath(os.path.join(self.root, *_norm(path, os.name == "nt").split("/")))
@@ -275,6 +280,7 @@ class RealFS:
         a, b = self._path(src), self._path(dst)
         self._note(f"rename {_norm(src)} -> {_norm(dst)}")
         tok = self._begin("fs.rename")
+        os.makedirs(os.path.dirname(b), exist_ok=True)   # directories are implicit, as in SimFS
         os.replace(a, b)
         self._end(tok, "fs.rename")
 
@@ -291,7 +297,7 @@ class RealFS:
         full = self.root if not d else self._path(d)
         self._note(f"fsync_dir {d or '.'}")
         tok = self._begin("fs.fsync_dir")
-        if os.name != "nt":
+        if os.name != "nt" and os.path.isdir(full):   # a directory nothing was written to yet is valid in SimFS: no-op
             fd = os.open(full, os.O_RDONLY)
             try:
                 os.fsync(fd)

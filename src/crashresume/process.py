@@ -12,6 +12,7 @@ inputs must be JSON; idempotency keys must be str or int; durable state lives in
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import re
@@ -71,9 +72,16 @@ def conform_process(
     thorough: bool = False,
     python: Optional[str] = None,
     workdir: Optional[str] = None,
+    workers: int = 1,
 ) -> ConformanceReport:
-    """Like ``conform`` but each process life is a real subprocess killed with SIGKILL."""
+    """Like ``conform`` but each process life is a real subprocess killed with SIGKILL.
+
+    ``workers=N`` runs up to N scenarios at once (each in its own directory and processes); the report is
+    identical to ``workers=1``, only faster. The subject must not share a resource between scenarios
+    (a fixed port, one shared file outside ``ctx.fs``)."""
     _validate(max_crashes, max_scenarios, sample)
+    if not isinstance(workers, int) or isinstance(workers, bool) or workers < 1:
+        raise ValueError("workers must be an int >= 1")
     if not isinstance(timeout, (int, float)) or isinstance(timeout, bool) or not timeout > 0:
         raise ValueError("timeout must be a number of seconds greater than 0")
     if check_payloads is None:
@@ -94,14 +102,13 @@ def conform_process(
     env = dict(os.environ)
     env["PYTHONPATH"] = os.pathsep.join([p for p in sys.path if p] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     env["PYTHONUTF8"] = "1"
-    counter = [0]
+    counter = itertools.count(1)
 
     def life(sid: str, crash: Optional[Crash]) -> Tuple[Optional[int], str]:
         """Run one process life. Returns (returncode, stderr tail); returncode None = timeout."""
         d = os.path.join(root, _SAFE.sub("_", sid))
         os.makedirs(d, exist_ok=True)
-        counter[0] += 1
-        spec_path = os.path.join(root, f"spec-{counter[0]}.json")
+        spec_path = os.path.join(root, f"spec-{next(counter)}.json")
         spec: Dict[str, Any] = {"target": target, "inputs": inputs, "dir": d, "run_id": sid}
         if crash:
             spec["crash_at"], spec["when"] = crash
@@ -176,7 +183,7 @@ def conform_process(
         modes = (AFTER, BEFORE) if crash_before else (AFTER,)
         report = _explore(run_id, base, play, modes=modes, torn=False, max_crashes=max_crashes,
                           max_scenarios=max_scenarios, check_payloads=check_payloads, payload_key=payload_key,
-                          strict_keyless=strict_keyless, sample=sample)
+                          strict_keyless=strict_keyless, sample=sample, workers=workers)
         report.warnings.insert(0, "process mode: crashes are real SIGKILLs; torn writes are not modelled here (use conform)")
         return report
     finally:

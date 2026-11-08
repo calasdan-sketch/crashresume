@@ -1,0 +1,11 @@
+scenario run-z1: stale worker paused at point #1
+baseline (no crash): 1 crash point(s) (effect)
+baseline keyed effects: ['c:a']
+worker 1 (generation 1)
+  #1 effect: charge key='c:a' payload='a'   <-- worker PAUSES here (a long stall); its replacement runs to the end first
+replacement worker (generation 2) takes over and runs every input
+  #1 effect: charge key='c:a' payload='a'
+worker 1 WAKES UP at effect #1 and carries on (generation 1)
+  stale worker effect: charge key='c:a'
+effects that happened across all lives: ['c:a', 'c:a']
+finding [stale_worker]: after the stale worker woke up: key 'c:a' issued 2 times

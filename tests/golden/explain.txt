@@ -1,0 +1,11 @@
+scenario run-1: crash after point #1
+baseline (no crash): 2 crash point(s) (effect)
+baseline keyed effects: ['c:a', 'c:b']
+process life 1: killed after point #1
+  #1 effect: charge key='c:a' payload={'id': 'a'}   <-- KILLED right after this committed
+  -- process dies here; un-fsynced file data is lost
+resume (clean process, no crash)
+  #1 effect: charge key='c:a' payload={'id': 'a'}
+  #2 effect: charge key='c:b' payload={'id': 'b'}
+effects that happened across all lives: ['c:a', 'c:a', 'c:b']
+finding [effect_replayed]: key 'c:a' issued 2 times

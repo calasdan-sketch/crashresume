@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import collections.abc as _abc
 import copy
+import errno
 import functools
 import inspect
 import json
@@ -36,6 +37,7 @@ import re
 import reprlib
 import threading
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -44,13 +46,22 @@ from .fs import SimFS
 AFTER = "after"
 BEFORE = "before"
 TORN = "torn"   # crash after an fs.write with the un-fsynced tail torn to a prefix
-_WHENS = (AFTER, BEFORE, TORN)
+TIMEOUT = "timeout"   # fault: the effect commits, but the caller is told it timed out (lost acknowledgement)
+REFUSED = "refused"   # fault: the effect is NOT executed, the caller gets a connection error
+STALE = "stale"       # fault: a paused worker wakes up after its replacement has finished (zombie)
+DISKFULL = "diskfull"   # fault: an fs.write stores half its data, then fails with ENOSPC
+_FAULTS = (TIMEOUT, REFUSED, DISKFULL)
+_WHENS = (AFTER, BEFORE, TORN, TIMEOUT, REFUSED, STALE, DISKFULL)
+_FAULT_POINT = {TIMEOUT: "effect", REFUSED: "effect", STALE: "effect", DISKFULL: "fs.write"}   # where each fault can fire
 
 _short = reprlib.Repr()
 _short.maxstring = 80
 _short.maxother = 80
 _short.maxlist = _short.maxtuple = _short.maxset = _short.maxdict = 8
 _short.maxlevel = 3
+
+
+_STALE_TIMEOUT = 20.0   # seconds a paused stale worker waits to be released before giving up
 
 
 def clean(text: str) -> str:
@@ -120,6 +131,20 @@ class InjectedCrash(BaseException):
     """
 
 
+class InjectedTimeout(TimeoutError):
+    """Raised into the subject by ``faults=True``: the effect DID commit, but the caller
+    is told it timed out (a lost acknowledgement). An ``OSError`` like the real thing."""
+
+
+class InjectedRefusal(ConnectionRefusedError):
+    """Raised into the subject by ``faults=True``: the effect was NOT executed."""
+
+
+class FencedOut(Exception):
+    """A write carrying a stale fencing token (``fence=``) was rejected, like a resource
+    that remembers the highest token it has seen. A stale worker should stop on this."""
+
+
 @dataclass(frozen=True)
 class Effect:
     kind: str
@@ -186,12 +211,16 @@ class EffectLog:
         self._effects: List[Effect] = []
         self._keys: List[Any] = []          # keyed effects only, in order
         self._first: Dict[Any, int] = {}    # key -> index of its first occurrence in _keys
+        self.fence_high: Optional[int] = None   # highest fencing token any effect has presented
+        self._by_key: Dict[Any, Effect] = {}    # first effect per key (what an idempotent resource would hand back)
+        self.results: Dict[Any, Any] = {}       # first return value per key, for ctx.tool(..., dedupe=True)
 
     def record(self, kind: str, payload: Any = None, key: Optional[str] = None) -> Effect:
         e = Effect(kind=kind, payload=payload, key=key, seq=len(self._effects))
         self._effects.append(e)
         if key is not None:
             self._first.setdefault(key, len(self._keys))
+            self._by_key.setdefault(key, e)
             self._keys.append(key)
         return e
 
@@ -233,10 +262,14 @@ class Context:
 
     def __init__(self, run_id: str, log: EffectLog, crash_at: Optional[int] = None,
                  store: Optional[Dict[str, Any]] = None, crash_when: str = AFTER,
-                 fs: Optional[Any] = None, trace: Optional[List[str]] = None) -> None:
+                 fs: Optional[Any] = None, trace: Optional[List[str]] = None, generation: int = 1,
+                 hold: Optional[Tuple[int, Any, Any]] = None) -> None:
         if crash_when not in _WHENS:
             raise ValueError(f"crash_when must be one of {_WHENS}, got {crash_when!r}")
         self.run_id = run_id
+        #: 1 for the first process life of a scenario, +1 for every restart. Use it as a fencing token:
+        #: ``ctx.effect(..., fence=ctx.generation)`` is rejected (``FencedOut``) once a newer life has written.
+        self.generation = generation
         self.effects = log
         self.store: Dict[str, Any] = {} if store is None else store
         self.fs: Any = SimFS() if fs is None else fs
@@ -244,7 +277,8 @@ class Context:
         self._owner = threading.get_ident()
         self.off_thread = False   # a crash point was hit on a thread other than the one that built the context
         self.trace = trace   # when a list: one line per crash point (used by explain())
-        self.fs._bind(self._begin, self._end, self._note)
+        self._short = False     # set while a disk-full fault is firing: the fs write in progress stores half its data
+        self.fs._bind(self._begin, self._end, self._note, lambda: self._short)
         self._log = log
         self._crash_at = crash_at
         self._crash_when = crash_when
@@ -252,6 +286,8 @@ class Context:
         self.points: List[str] = []   # kind of every crash point this process life passed
         self.crashed = False    # True once a crash was injected in this process life
         self.swallowed = False  # True if the subject kept running after a crash
+        self.faulted = False    # True once a ``faults=True`` fault was injected in this process life
+        self._hold = hold       # (point, arrived_event, release_event): pause here (stale-worker scenario)
 
     # -- crash machinery -------------------------------------------------
     def _die(self, message: str) -> None:
@@ -264,6 +300,28 @@ class Context:
         if self.trace is not None:
             self.trace.append(f"#{self._count} {kind}:" + (f" {self._pending}" if self._pending else ""))
             self._pending = ""
+        if self._hold is not None and kind == "effect" and self._count == self._hold[0]:
+            _, arrived, release = self._hold
+            if self.trace is not None:
+                self.trace[-1] += "   <-- worker PAUSES here (a long stall); its replacement runs to the end first"
+            arrived.set()
+            release.wait(_STALE_TIMEOUT)
+        if self._crash_when in _FAULTS:
+            if kind == _FAULT_POINT[self._crash_when] and self._crash_at == self._count and not self.faulted:
+                self.faulted = True
+                if self._crash_when == DISKFULL:
+                    if self.trace is not None:
+                        self.trace[-1] += "   <-- FAULT: disk full, half of the data is written, then ENOSPC"
+                    self._short = True
+                    return True, desc
+                if self._crash_when == REFUSED:
+                    if self.trace is not None:
+                        self.trace[-1] += "   <-- FAULT: refused, NOT executed"
+                    raise InjectedRefusal(f"fault injected: {desc} was refused and not executed")
+                if self.trace is not None:
+                    self.trace[-1] += "   <-- FAULT: executes, but the caller will see a timeout"
+                return True, desc
+            return False, desc
         armed = self._crash_at is not None and self._count >= self._crash_at
         if armed:
             if self.crashed:
@@ -283,16 +341,30 @@ class Context:
     def _end(self, token: Tuple[bool, str], kind: str = "") -> None:
         armed, desc = token
         if armed:
+            if self._crash_when == DISKFULL:
+                self._short = False
+                raise OSError(errno.ENOSPC, f"No space left on device (fault injected after half of {desc})")
+            if self._crash_when == TIMEOUT:
+                raise InjectedTimeout(f"fault injected: {desc} committed, but the caller saw a timeout")
             self._die(f"crash injected after {desc}")
 
     # -- the side-effect channel -----------------------------------------
     def effect(self, kind: str, payload: Any = None, key: Optional[str] = None,
-               _do: Optional[Callable[[], Any]] = None) -> Effect:
+               _do: Optional[Callable[[], Any]] = None, fence: Optional[int] = None, dedupe: bool = False) -> Effect:
         """Record a side effect.
 
         In the default ``after`` mode the crash is injected right after recording:
         side effect committed, process died before the checkpoint. In ``before``
         mode the process dies just before the effect is committed.
+
+        ``fence`` is an optional fencing token (use ``ctx.generation``): the effect is rejected
+        with ``FencedOut`` if any effect has already presented a higher token, so a stale
+        worker that wakes up after its replacement cannot write.
+
+        ``dedupe=True`` says the resource honours the idempotency ``key`` (like a payment provider
+        given an idempotency key): a second effect with a key it already has is ignored - nothing is
+        recorded, the first effect is returned - so it is never counted as a replay. Only claim this
+        for a resource that really does it; the harness cannot check.
         """
         if key is not None:
             try:
@@ -302,23 +374,43 @@ class Context:
         if self.trace is not None:
             self._note(f"{clean(str(kind))} key={_r(key)} payload={_r(payload)}")
         tok = self._begin("effect", f"effect #{self._count + 1} ({kind})")
+        self._admit(fence)
+        if dedupe and key is not None and key in self._log._by_key:
+            first = self._log._by_key[key]
+            if self.trace is not None:
+                self.trace[-1] += "   (resource ignores it: key already seen)"
+            self._end(tok)
+            return first
         if _do is not None:
             _do()
         e = self._log.record(kind, payload, key)
         self._end(tok)
         return e
 
+    def _admit(self, fence: Optional[int]) -> None:
+        """Fencing-token check, at the moment the effect would take place."""
+        if fence is None:
+            return
+        if not isinstance(fence, int) or isinstance(fence, bool):
+            raise TypeError(f"fence must be an int (pass ctx.generation), got {type(fence).__name__}")
+        high = self._log.fence_high
+        if high is not None and fence < high:
+            raise FencedOut(f"write rejected: fencing token {fence} is older than {high} (a newer worker has written)")
+        self._log.fence_high = fence if high is None else max(high, fence)
+
     def tool(self, fn: Callable[..., Any], *, kind: Optional[str] = None,
-             key: Any = None, payload: Any = None) -> Callable[..., Any]:
+             key: Any = None, payload: Any = None, fence: Optional[int] = None,
+             dedupe: bool = False) -> Callable[..., Any]:
         """Wrap a real tool/function so every call is one crash-tested effect.
 
         The wrapper runs ``fn`` between the "before" and "after" crash points, then
         records the effect and returns ``fn``'s result - a drop-in for the tool
         lists of agent frameworks. ``key`` / ``payload`` may be constants or
         callables receiving the call's ``(*args, **kwargs)``. Coroutine functions
-        get an ``async`` wrapper.
+        get an ``async`` wrapper. ``fence`` is a fencing token and ``dedupe`` says the resource honours
+        the key (a repeat call returns the first call's result without running ``fn``), see ``effect``.
         """
-        name = kind or getattr(fn, "__name__", "tool")
+        name = str(kind or getattr(fn, "__name__", "tool"))
 
         def meta(a: tuple, kw: dict) -> Tuple[Any, Any]:
             k = key(*a, **kw) if callable(key) else key
@@ -334,8 +426,14 @@ class Context:
                 if self.trace is not None:
                     self._note(f"{clean(str(name))} key={_r(k)} payload={_r(p)}")
                 tok = self._begin("effect", f"effect #{self._count + 1} ({name})")
+                self._admit(fence)
+                if dedupe and k is not None and k in self._log._by_key:
+                    self._end(tok)
+                    return self._log.results.get(k)
                 result = await fn(*a, **kw)
                 self._log.record(name, p, k)
+                if dedupe and k is not None:
+                    self._log.results.setdefault(k, result)
                 self._end(tok)
                 return result
             return awrapper
@@ -344,7 +442,12 @@ class Context:
         def wrapper(*a: Any, **kw: Any) -> Any:
             k, p = meta(a, kw)
             box: List[Any] = []
-            self.effect(name, p, key=k, _do=lambda: box.append(fn(*a, **kw)))
+            seen = dedupe and k is not None and k in self._log._by_key
+            self.effect(name, p, key=k, _do=lambda: box.append(fn(*a, **kw)), fence=fence, dedupe=dedupe)
+            if seen:
+                return self._log.results.get(k)
+            if dedupe and k is not None:
+                self._log.results.setdefault(k, box[0])
             return box[0]
         return wrapper
 
@@ -352,14 +455,27 @@ class Context:
 @dataclass(frozen=True)
 class Finding:
     # state_lost | effect_replayed | effect_lost | effect_diverged |
-    # resume_diverged | resume_crashed | subject_error | crash_swallowed | subject_hang
+    # resume_diverged | resume_crashed | subject_error | crash_swallowed | subject_hang | stale_worker
     kind: str
     crash_after: int   # crash point of the FIRST crash in the scenario
     detail: str
     scenario: str = ""  # run_id of the scenario, e.g. "run-2", "run-b1", "run-t4", "run-2-1"
-    when: str = AFTER   # whether the first crash was "after", "before" or "torn"
+    when: str = AFTER   # the first fault: "after", "before", "torn" (crashes), "timeout", "refused", "stale"
     crashes: Tuple[Tuple[int, str], ...] = ()   # every crash in the scenario: (point, when)
     point: str = "effect"   # kind of the first crash point: "effect", "fs.write", "fs.fsync", ...
+
+
+def where(when: str, point: str, n: int) -> str:
+    """Plain-words description of one injected fault, for reports."""
+    if when == TIMEOUT:
+        return f"timeout after {point} #{n}"
+    if when == REFUSED:
+        return f"refusal before {point} #{n}"
+    if when == STALE:
+        return f"stale worker paused at {point} #{n}"
+    if when == DISKFULL:
+        return f"disk full during {point} #{n}"
+    return f"crash {when} {point} #{n}"
 
 
 @dataclass(frozen=True)
@@ -435,7 +551,7 @@ class ConformanceReport:
             return head + " - PASS" + warn
         shown = self.findings[: self.MAX_SHOWN]
         body = "\n".join(
-            f"  [{f.kind}] crash {f.when} {f.point} #{f.crash_after}"
+            f"  [{f.kind}] {where(f.when, f.point, f.crash_after)}"
             + (f" ({f.scenario})" if f.scenario else "")
             + f": {f.detail}"
             for f in shown
@@ -500,7 +616,7 @@ def _run(factory: Callable[[Context], Any], inputs: Sequence[Any], ctx: Context)
 
 Crash = Tuple[int, str]  # (crash point index within that process life, AFTER|BEFORE|TORN)
 
-_TAG = {AFTER: "", BEFORE: "b", TORN: "t"}
+_TAG = {AFTER: "", BEFORE: "b", TORN: "t", TIMEOUT: "o", REFUSED: "r", STALE: "z", DISKFULL: "d"}
 
 
 def _scenario_id(run_id: str, crashes: Sequence[Crash]) -> str:
@@ -517,6 +633,8 @@ class _Outcome:
     last_life_kinds: List[str] = field(default_factory=list)
     error: Optional[Finding] = None
     unreached: Optional[str] = None
+    leaf: bool = False   # no deeper (crash-during-recovery) scenarios make sense below this one
+    notes: List[str] = field(default_factory=list)   # warnings to surface
 
 
 def _survive(store: Dict[str, Any], isolate: bool) -> Dict[str, Any]:
@@ -541,6 +659,8 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
           crashes: Sequence[Crash], isolate: bool = True, strict_dirs: bool = False,
           trace: Optional[List[str]] = None) -> _Outcome:
     """Run one scenario: crash once per entry in ``crashes``, then resume clean."""
+    if crashes[0][1] == STALE:
+        return _play_stale(factory, inputs, run_id, crashes, strict_dirs, trace)
     sid = _scenario_id(run_id, crashes)
     first = crashes[0][0]
     log = EffectLog()
@@ -565,10 +685,11 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
     for life, (k, when) in enumerate(crashes, 1):
         if life > 1:
             store = _survive(store, isolate)
-        lines = lane(f"process life {life}: killed {when} point #{k}")
-        ctx = Context(sid, log, crash_at=k, store=store, crash_when=when, fs=fs, trace=lines)
+        lines = lane(f"process life {life}: killed {when} point #{k}" if when not in _FAULTS
+                     else f"process life {life}: {when} fault at point #{k}")
+        ctx = Context(sid, log, crash_at=k, store=store, crash_when=when, fs=fs, trace=lines, generation=life)
         try:
-            _run(factory, inputs, ctx)
+            handled_agent = _run(factory, inputs, ctx)
         except InjectedCrash:
             if lines:
                 lines[-1] += "   <-- KILLED " + {AFTER: "right after this committed", BEFORE: "BEFORE this committed",
@@ -585,8 +706,28 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
             continue
         except Exception as exc:  # noqa: BLE001 - reported, not hidden
             flush(lines)
+            if ctx.faulted:   # the error that escaped step() came after an injected fault: the process exits on it
+                if trace is not None:
+                    trace.append(f"  -- {type(exc).__name__} escaped step(); the process exits (files already written stay)")
+                if life == 1:
+                    out.first_life_effects = len(log)
+                continue
             return fail("subject_error", f"process life {life} raised {type(exc).__name__}: {_r(exc)}")
         flush(lines)
+        if ctx.faulted:   # the subject handled the injected error and carried on to the end of its inputs
+            if trace is not None:
+                trace.append("  -- the subject handled the injected error and finished its inputs")
+            if life == 1:
+                out.first_life_effects = len(log)
+            if life == len(crashes):   # nothing failed that needs a restart: judge the finished run as it stands
+                out.leaf = True
+                try:
+                    out.final_state = _snapshot(handled_agent)
+                except Exception as exc:  # noqa: BLE001
+                    return fail("subject_error",
+                                f"reading state after the injected error raised {type(exc).__name__}: {_r(exc)}")
+                return out
+            continue
         if ctx.crashed:
             return fail("crash_swallowed", f"process life {life} {_SWALLOWED}" + (_THREAD_HINT if ctx.off_thread else ""))
         out.unreached = (
@@ -599,7 +740,7 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
     before = len(log)
     store = _survive(store, isolate)
     lines = lane("resume (clean process, no crash)")
-    ctx = Context(sid, log, store=store, fs=fs, trace=lines)
+    ctx = Context(sid, log, store=store, fs=fs, trace=lines, generation=len(crashes) + 1)
     try:
         agent = _run(factory, inputs, ctx)
         out.final_state = _snapshot(agent)
@@ -613,6 +754,103 @@ def _play(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
     return out
 
 
+def _play_stale(factory: Callable[[Context], Any], inputs: Sequence[Any], run_id: str,
+                crashes: Sequence[Crash], strict_dirs: bool = False,
+                trace: Optional[List[str]] = None) -> _Outcome:
+    """Stale-worker (zombie) scenario: the worker pauses just before effect ``k`` (a long GC pause,
+    a lost lease, a frozen VM). Its replacement starts, runs every input to the end, and only then
+    does the original wake up and carry on with whatever it had decided before it stalled. Both see
+    the same durable ``ctx.store`` / ``ctx.fs`` (one live dict: a database, not a snapshot)."""
+    sid = _scenario_id(run_id, crashes)
+    k = crashes[0][0]
+    log = EffectLog()
+    store: Dict[str, Any] = {}
+    fs = SimFS(dir_durability=strict_dirs)
+    out = _Outcome(log=log, leaf=True)
+
+    def fail(kind: str, detail: str) -> _Outcome:
+        out.error = Finding(kind, k, detail, sid, STALE, tuple(crashes))
+        return out
+
+    signal, release = threading.Event(), threading.Event()
+    arrived = threading.Event()
+    lines1: Optional[List[str]] = [] if trace is not None else None
+    class _Wake:   # setting it also wakes the parent, which waits on ``signal``
+        @staticmethod
+        def set() -> None:
+            arrived.set()
+            signal.set()
+
+    ctx1 = Context(sid, log, store=store, fs=fs, trace=lines1, generation=1, hold=(k, _Wake, release))
+    box: Dict[str, Any] = {}
+
+    def worker() -> None:
+        try:
+            _run(factory, inputs, ctx1)
+        except BaseException as exc:  # noqa: BLE001 - the stale worker may die any way it likes
+            box["exc"] = exc
+        finally:
+            signal.set()
+
+    t = threading.Thread(target=worker, name="crashresume-stale-worker", daemon=True)
+    t.start()
+    if not signal.wait(_STALE_TIMEOUT):
+        release.set()
+        return fail("subject_hang", f"the first worker did not reach effect #{k} within {_STALE_TIMEOUT:.0f}s")
+    if trace is not None and lines1:
+        trace.append("worker 1 (generation 1)")
+        trace.extend("  " + ln for ln in lines1)
+    if not arrived.is_set():
+        exc = box.get("exc")
+        if isinstance(exc, Exception):
+            return fail("subject_error", f"worker 1 raised {type(exc).__name__}: {_r(exc)}")
+        out.unreached = (f"{sid}: effect point #{k} never reached by the first worker "
+                         "(subject issued fewer effects than the baseline - nondeterministic?); replaced without a pause")
+    out.first_life_effects = len(log)
+    before = len(log)
+    lines2: Optional[List[str]] = [] if trace is not None else None
+    if trace is not None:
+        trace.append("replacement worker (generation 2) takes over and runs every input")
+    ctx2 = Context(sid, log, store=store, fs=fs, trace=lines2, generation=2)
+    agent: Any = None
+    try:
+        agent = _run(factory, inputs, ctx2)
+    except InjectedCrash:
+        fail("resume_crashed", "replacement worker raised InjectedCrash")
+    except Exception as exc:  # noqa: BLE001
+        fail("subject_error", f"replacement worker raised {type(exc).__name__}: {_r(exc)}")
+    except BaseException:   # SystemExit / KeyboardInterrupt: do not leave the paused worker waiting
+        release.set()
+        raise
+    if trace is not None and lines2 is not None:
+        trace.extend("  " + ln for ln in lines2)
+    out.last_life_effects = len(log) - before
+    out.last_life_kinds = list(ctx2.points)
+    if arrived.is_set():
+        if trace is not None:
+            trace.append(f"worker 1 WAKES UP at effect #{k} and carries on (generation 1)")
+        mark = len(log)
+        release.set()
+        t.join(_STALE_TIMEOUT)
+        if t.is_alive():
+            out.notes.append(f"{sid}: the stale worker was still running {_STALE_TIMEOUT:.0f}s after waking; "
+                             "its later effects may be missing")
+        werr = box.get("exc")
+        if trace is not None:
+            for e in log.effects[mark:]:
+                trace.append(f"  stale worker effect: {clean(str(e.kind))} key={_r(e.key)}")
+            if isinstance(werr, FencedOut):
+                trace.append(f"  stale worker stopped: {_r(werr)}")
+            elif werr is not None:
+                trace.append(f"  stale worker ended with {type(werr).__name__}")
+    if out.error is None and agent is not None:
+        try:
+            out.final_state = _snapshot(agent)
+        except Exception as exc:  # noqa: BLE001
+            return fail("subject_error", f"reading state after the stale worker woke raised {type(exc).__name__}: {_r(exc)}")
+    return out
+
+
 def _check(report: ConformanceReport, sid: str, first: int, out: _Outcome,
            base_effects: List[Effect], base_state: Any,
            check_payloads: bool = True, payload_key: Optional[Callable[[Any], Any]] = None,
@@ -623,6 +861,8 @@ def _check(report: ConformanceReport, sid: str, first: int, out: _Outcome,
     when = crashes[0][1] if crashes else AFTER
 
     def add(kind: str, detail: str) -> None:
+        if when == STALE and kind in ("effect_replayed", "effect_diverged", "resume_diverged"):
+            kind, detail = "stale_worker", f"after the stale worker woke up: {detail}"
         report.findings.append(Finding(kind, first, detail, sid, when, crashes))
 
     # 1. keyed effects issued more than once, or more often than in the baseline
@@ -665,18 +905,18 @@ def _check(report: ConformanceReport, sid: str, first: int, out: _Outcome,
             if msg not in report.warnings:
                 report.warnings.append(msg)
     if strict_keyless:
-        for sig, want in sorted(base_sig.items()):
-            if final_sig.get(sig, 0) < want:
+        for sig, want_n in sorted(base_sig.items()):
+            if final_sig.get(sig, 0) < want_n:
                 got = final_sig.get(sig, 0)
-                add("effect_lost", f"keyless effect {sig[0]!r} payload {_r(sig[1])} happened {got} time(s), baseline {want}")
+                add("effect_lost", f"keyless effect {sig[0]!r} payload {_r(sig[1])} happened {got} time(s), baseline {want_n}")
 
     # 3. keyed effects that vanished, or were issued fewer times than in the baseline
     for key in sorted(base_keys, key=_sig):
-        n, want = final_keys.get(key, 0), base_keys[key]
-        if n == 0:
+        seen_n, want_n = final_keys.get(key, 0), base_keys[key]
+        if seen_n == 0:
             add("effect_lost", f"key {_r(key)} never issued after resume")
-        elif n < want:
-            add("effect_lost", f"key {_r(key)} issued {n} time(s), baseline {want}")
+        elif seen_n < want_n:
+            add("effect_lost", f"key {_r(key)} issued {seen_n} time(s), baseline {want_n}")
 
     # 4. state invariants (only when the subject exposes comparable state).
     #    A subject that reconciles against the committed effect log may start
@@ -711,12 +951,16 @@ def _thin(points: List[int], sample: Optional[int], skipped: Optional[List[int]]
 
 
 def _menu(kinds: Sequence[str], modes: Sequence[str], torn: bool,
-          sample: Optional[int] = None, skipped: Optional[List[int]] = None) -> List[Crash]:
-    """Crash options for a process life whose crash points have these kinds."""
+          sample: Optional[int] = None, skipped: Optional[List[int]] = None,
+          extra: Sequence[str] = ()) -> List[Crash]:
+    """Crash options for a process life whose crash points have these kinds. ``extra`` are fault
+    kinds (timeout, refused, stale) that apply to ``ctx.effect`` points only."""
     every = list(range(1, len(kinds) + 1))
     out: List[Crash] = [(k, when) for when in modes for k in _thin(every, sample, skipped)]
     if torn:
         out += [(k, TORN) for k in _thin([k for k in every if kinds[k - 1] == "fs.write"], sample, skipped)]
+    for when in extra:
+        out += [(k, when) for k in _thin([k for k in every if kinds[k - 1] == _FAULT_POINT[when]], sample, skipped)]
     return out
 
 
@@ -735,6 +979,8 @@ def _explore(
     only: Optional[Sequence[Tuple[Crash, ...]]] = None,
     stop: Optional[Callable[[Finding], bool]] = None,
     sample: Optional[int] = None,
+    extra: Sequence[str] = (),
+    workers: int = 1,
 ) -> ConformanceReport:
     report = ConformanceReport()
     skipped = [0]
@@ -743,6 +989,9 @@ def _explore(
         return report
     if torn and "fs.write" not in base.kinds:
         report.warnings.append("torn_writes=True but the subject never wrote through ctx.fs; nothing was torn")
+    if extra and not {"effect", "fs.write"} & set(base.kinds):
+        report.warnings.append("faults / stale_worker need ctx.effect, ctx.tool or ctx.fs.write calls, "
+                               "and the subject made none; nothing was injected")
     for key, n in Counter(e.key for e in base.effects if e.key is not None).items():
         if n > 1:
             report.warnings.append(
@@ -751,42 +1000,62 @@ def _explore(
             )
 
     # breadth-first: all single crashes first, so a cap trims the deepest scenarios
-    first_level = [(c,) for c in _menu(base.kinds, modes, torn, sample, skipped)]
-    queue: List[Tuple[Crash, ...]] = list(only) if only is not None else first_level
+    first_level: List[Tuple[Crash, ...]] = [(c,) for c in _menu(base.kinds, modes, torn, sample, skipped, extra)]
+    queue: List[Tuple[Crash, ...]] = [tuple(c) for c in only] if only is not None else first_level
     truncated = False
     dropped = 0   # children never enqueued because of the cap
     i = 0
-    while i < len(queue):
-        if max_scenarios is not None and report.crash_points >= max_scenarios:
-            truncated = True
-            break
-        crashes = queue[i]
-        i += 1
-        sid = _scenario_id(run_id, crashes)
-        out = play(crashes)
-        if out.unreached and out.unreached not in report.warnings:
-            report.warnings.append(out.unreached)
-        report.crash_points += 1
-        report.scenarios.append(sid)
-        start = len(report.findings)
-        if out.error is not None:
-            report.findings.append(out.error)
-        else:
-            _check(report, sid, crashes[0][0], out, base.effects, base.state, check_payloads, payload_key,
-                   strict_keyless, crashes)
-        if len(report.findings) > start and 0 < crashes[0][0] <= len(base.kinds):
-            pk = base.kinds[crashes[0][0] - 1]
-            report.findings[start:] = [replace(f, point=pk) for f in report.findings[start:]]
-        if stop is not None and any(stop(f) for f in report.findings[start:]):
-            return report
-        if out.error is not None:
-            continue
-        if only is None and len(crashes) < max_crashes and not out.unreached:
-            for child in _menu(out.last_life_kinds, modes, torn, sample, skipped):
-                if max_scenarios is not None and len(queue) >= max_scenarios:
-                    dropped += 1
-                else:
-                    queue.append(crashes + (child,))
+    pool = ThreadPoolExecutor(max_workers=workers) if workers > 1 else None
+    pending: Dict[Tuple[Crash, ...], Any] = {}
+
+    def run_one(crashes: Tuple[Crash, ...]) -> _Outcome:
+        """Scenarios are independent, so with ``workers>1`` the next few run ahead on a thread pool; their
+        results are still consumed strictly in queue order, so the report does not depend on ``workers``."""
+        if pool is None:
+            return play(crashes)
+        for ahead in queue[i - 1:i - 1 + workers]:
+            if ahead not in pending:
+                pending[ahead] = pool.submit(play, ahead)
+        return pending.pop(crashes).result()
+
+    try:
+        while i < len(queue):
+            if max_scenarios is not None and report.crash_points >= max_scenarios:
+                truncated = True
+                break
+            crashes = queue[i]
+            i += 1
+            sid = _scenario_id(run_id, crashes)
+            out = run_one(crashes)
+            if out.unreached and out.unreached not in report.warnings:
+                report.warnings.append(out.unreached)
+            report.crash_points += 1
+            report.scenarios.append(sid)
+            start = len(report.findings)
+            if out.error is not None:
+                report.findings.append(out.error)
+            else:
+                _check(report, sid, crashes[0][0], out, base.effects, base.state, check_payloads, payload_key,
+                       strict_keyless, crashes)
+            if len(report.findings) > start and 0 < crashes[0][0] <= len(base.kinds):
+                pk = base.kinds[crashes[0][0] - 1]
+                report.findings[start:] = [replace(f, point=pk) for f in report.findings[start:]]
+            if stop is not None and any(stop(f) for f in report.findings[start:]):
+                return report
+            for note in out.notes:
+                if note not in report.warnings:
+                    report.warnings.append(note)
+            if out.error is not None:
+                continue
+            if only is None and len(crashes) < max_crashes and not out.unreached and not out.leaf:
+                for child in _menu(out.last_life_kinds, modes, torn, sample, skipped):
+                    if max_scenarios is not None and len(queue) >= max_scenarios:
+                        dropped += 1
+                    else:
+                        queue.append(crashes + (child,))
+    finally:
+        if pool is not None:
+            pool.shutdown(wait=True, cancel_futures=True)
     if skipped[0]:
         report.warnings.append(
             f"sample={sample}: {skipped[0]} crash point(s) were NOT tested (evenly spaced subset only); "
@@ -826,8 +1095,11 @@ def _conform(
     strict_dirs: bool = False,
     sample: Optional[int] = None,
     check_determinism: bool = False,
+    faults: bool = False,
+    stale_worker: bool = False,
 ) -> ConformanceReport:
     modes = (AFTER, BEFORE) if crash_before else (AFTER,)
+    extra = (TIMEOUT, REFUSED, DISKFULL) * faults + (STALE,) * stale_worker
     bctx = Context(run_id, EffectLog(), fs=SimFS(dir_durability=strict_dirs))
     baseline_agent = _run(factory, inputs, bctx)
     base = _Baseline(bctx.effects.effects, _snapshot(baseline_agent), list(bctx.points))
@@ -835,7 +1107,7 @@ def _conform(
         run_id, base, lambda crashes: _play(factory, inputs, run_id, crashes, isolate_store, strict_dirs),
         modes=modes, torn=torn_writes, max_crashes=max_crashes, max_scenarios=max_scenarios,
         check_payloads=check_payloads, payload_key=payload_key, strict_keyless=strict_keyless,
-        only=only, stop=stop, sample=sample,
+        only=only, stop=stop, sample=sample, extra=extra,
     )
     if check_determinism and base.kinds:
         note = _nondeterminism(factory, inputs, run_id, base, strict_dirs)
@@ -884,6 +1156,8 @@ def conform(
     strict_dirs: bool = False,
     sample: Optional[int] = None,
     check_determinism: bool = False,
+    faults: bool = False,
+    stale_worker: bool = False,
 ) -> ConformanceReport:
     """Run ``factory(ctx) -> subject`` to completion, then re-run it crashing at
     every crash point and compare against the baseline.
@@ -912,6 +1186,19 @@ def conform(
     * ``check_determinism`` - run the crash-free baseline a second time (under another
       run id) and warn if crash points or keys differ; runs your tools once more, so
       it is off by default and on in ``thorough``.
+    * ``faults`` - also inject three failures that are not crashes: at every ``ctx.effect`` /
+      ``ctx.tool`` call a *timeout* (the effect committed but the caller gets
+      ``InjectedTimeout``, a lost acknowledgement) and a *refusal* (the effect did not run;
+      the caller gets ``InjectedRefusal``), and at every ``ctx.fs.write`` a *full disk* (half of
+      the data is stored, then ``OSError(ENOSPC)``). A subject that retries must not repeat a
+      committed effect; one that swallows the error must not lose work; one that writes in place
+      must not trust the half-written file. An error that escapes ``step()`` counts as the process
+      exiting (no power cut), then resuming. Off by default (not part of ``thorough``).
+    * ``stale_worker`` - also pause the first worker just before each ``ctx.effect``, let its
+      replacement run every input to the end, then wake the first worker (a zombie after a lost
+      lease or a long pause). Subjects must fence: ``ctx.effect(..., fence=ctx.generation)``
+      is rejected with ``FencedOut`` once a newer worker wrote; a check done before the call
+      is not enough. Reported as ``stale_worker``. Off by default; runs in threads.
     * ``sample`` - test only this many evenly spaced crash points per crash kind and
       level (huge inputs); the report warns how many points were skipped.
     * ``check_payloads`` / ``payload_key`` - opt in to ``effect_diverged``: compare
@@ -938,6 +1225,7 @@ def conform(
         crash_before=crash_before, max_crashes=max_crashes, max_scenarios=max_scenarios,
         check_payloads=check_payloads, payload_key=payload_key, isolate_store=isolate_store,
         torn_writes=torn_writes, strict_keyless=strict_keyless, strict_dirs=strict_dirs, sample=sample,
+        faults=faults, stale_worker=stale_worker,
     )
     report = _conform(factory, inputs, run_id, **opts, stop=(lambda f: True) if fail_fast else None,
                       check_determinism=check_determinism)
@@ -968,6 +1256,7 @@ def replay(
     opts: Dict[str, Any] = dict(
         crash_before=False, max_crashes=len(crashes), max_scenarios=None, check_payloads=None, payload_key=None,
         isolate_store=True, torn_writes=False, strict_keyless=False, strict_dirs=False, sample=None,
+        faults=False, stale_worker=False,
     )
     opts.update(options)
     if opts["check_payloads"] is None:
@@ -1010,7 +1299,7 @@ def explain(
     else:
         _check(rep, sid, crashes[0][0], out, base.effects, base.state, check_payloads, payload_key,
                bool(options.get("strict_keyless", False)), crashes)
-    head = [f"scenario {sid}: " + ", then ".join(f"crash {w} point #{k}" for k, w in crashes)]
+    head = [f"scenario {sid}: " + ", then ".join(where(w, "point", k) for k, w in crashes)]
     head.append(f"baseline (no crash): {len(base.kinds)} crash point(s) ({', '.join(sorted(set(base.kinds)))})")
     head.append(f"baseline keyed effects: {_r([e.key for e in base.effects if e.key is not None])}")
     tail = [f"effects that happened across all lives: {_r([e.key if e.key is not None else e.kind for e in out.log.effects])}"]
@@ -1066,7 +1355,10 @@ def _minimize(factory: Callable[[Context], Any], inputs: List[Any], run_id: str,
         return next((f for f in rep.findings if f.kind == kind), None)
 
     for kind in seen:
-        small = _ddmin(list(inputs), lambda cur, k=kind: find(cur, k) is not None, budget)
+        def still(cur: List[Any], k: str = kind) -> bool:
+            return find(cur, k) is not None
+
+        small = _ddmin(list(inputs), still, budget)
         hit = find(small, kind)
         if hit is None:  # budget ran out mid-way or the finding was flaky: fall back to the original
             small, hit = list(inputs), seen[kind]

@@ -2,6 +2,23 @@
 
 ## 0.3.0 (unreleased)
 
+Round 5 (second field panel: durable-execution engineer, chaos-testing specialist, agent-framework maintainer; test-method upgrade)
+
+Author
+- The author, maintainer and copyright holder is now "Calas Automations Inc." (`pyproject.toml`, `LICENSE`, `crashresume.__author__`, `crashresume --version`, SARIF `tool.driver.organization`, JUnit `tool` property). Pinned by a test.
+
+Added
+- `faults=True` / `--faults`: at every `ctx.effect` / `ctx.tool` the effect either commits and the caller gets `InjectedTimeout` (lost acknowledgement), or never runs and the caller gets `InjectedRefusal`; at every `ctx.fs.write` the disk fills after half the data (`OSError(ENOSPC)`). Both exceptions are `OSError`s. An error that escapes `step()` counts as the process exiting (no power cut), then a restart; a handled error is judged as the finished run. Not part of `thorough`.
+- `stale_worker=True` / `--stale-worker`: the first worker pauses before each effect, its replacement runs every input, then the first worker wakes. New finding `stale_worker`. `ctx.effect(..., fence=ctx.generation)` and `ctx.tool(..., fence=...)` give a fencing token: a token older than the newest seen raises `FencedOut` and records nothing. `ctx.generation` is 1 for the first worker and grows with each restart. New exports: `InjectedTimeout`, `InjectedRefusal`, `FencedOut`.
+- `conform_process(workers=N)` / `--workers N`: N scenarios at once; the report is identical to a single worker. Speed-up not measured (the build machine had about one usable core).
+- `--json -`, `--junit -`, `--sarif -` write the report to standard output (the text report then goes to standard error).
+- Benchmark: two small corpora for the new options (`faults=True`: 5 agents, 3 broken, found 0 of 3 before and 3 of 3 with it; `stale_worker=True`: 4 agents, 2 broken, 0 of 2 before and 2 of 2 with it; no false alarms). `benchmarks/mutants.py` breaks the library 25 ways on purpose and checks the tests notice (`benchmarks/MUTANTS.md`).
+- Tests: seeded property tests (generated agents against a ground-truth oracle, determinism, replay, sampling subset, minimal repro, `clean`, `KeyView` against a plain list), a SimFS-versus-RealFS differential test, and golden files for the text, JSON, JUnit, SARIF and explain outputs.
+
+Fixed
+- `RealFS.rename` into a directory that did not exist yet failed (`SimFS` and the docs say directories are implicit); `RealFS.fsync_dir` on a directory nothing was written to failed where `SimFS` accepted it. Found by the differential test.
+- 11 internal type errors fixed; `mypy src` is clean and runs in CI (Python 3.12).
+
 Round 4 (the stranger's first hour: clean-venv install of the built wheel, packaging, hostile input, consoles, Windows review)
 
 Fixed

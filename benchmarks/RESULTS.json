@@ -4,6 +4,176 @@
     "broken": 16,
     "correct": 8
   },
+  "faults": {
+    "thorough (crashes only)": {
+      "crash_points_total": 462,
+      "f1": 0.0,
+      "false_alarms": [],
+      "fn": 4,
+      "fp": 0,
+      "missed": [
+        "faults_retry_blind",
+        "faults_retry_new_key",
+        "faults_swallow_and_checkpoint",
+        "faults_journal_retry_welds"
+      ],
+      "precision": 1.0,
+      "recall": 0.0,
+      "rows": [
+        {
+          "case": "faults_retry_checks_key",
+          "crash_points": 24,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "faults_let_it_crash",
+          "crash_points": 24,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "faults_retry_blind",
+          "crash_points": 24,
+          "detected": false,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "faults_retry_new_key",
+          "crash_points": 24,
+          "detected": false,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "faults_swallow_and_checkpoint",
+          "crash_points": 24,
+          "detected": false,
+          "expected": [
+            "effect_lost"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "faults_journal_repairs_on_retry",
+          "crash_points": 171,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "faults_journal_retry_welds",
+          "crash_points": 171,
+          "detected": false,
+          "expected": [
+            "resume_diverged"
+          ],
+          "flagged": false,
+          "kinds": []
+        }
+      ],
+      "tp": 0
+    },
+    "thorough + faults": {
+      "crash_points_total": 516,
+      "f1": 1.0,
+      "false_alarms": [],
+      "fn": 0,
+      "fp": 0,
+      "missed": [],
+      "precision": 1.0,
+      "recall": 1.0,
+      "rows": [
+        {
+          "case": "faults_retry_checks_key",
+          "crash_points": 30,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "faults_let_it_crash",
+          "crash_points": 48,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "faults_retry_blind",
+          "crash_points": 30,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "faults_retry_new_key",
+          "crash_points": 30,
+          "detected": true,
+          "expected": [
+            "effect_replayed"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_lost",
+            "effect_replayed"
+          ]
+        },
+        {
+          "case": "faults_swallow_and_checkpoint",
+          "crash_points": 30,
+          "detected": true,
+          "expected": [
+            "effect_lost"
+          ],
+          "flagged": true,
+          "kinds": [
+            "effect_lost"
+          ]
+        },
+        {
+          "case": "faults_journal_repairs_on_retry",
+          "crash_points": 174,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "faults_journal_retry_welds",
+          "crash_points": 174,
+          "detected": true,
+          "expected": [
+            "resume_diverged"
+          ],
+          "flagged": true,
+          "kinds": [
+            "resume_diverged"
+          ]
+        }
+      ],
+      "tp": 4
+    }
+  },
   "process_mode": [
     {
       "case": "ProcGood",
@@ -52,6 +222,129 @@
       ]
     }
   ],
+  "stale": {
+    "thorough (crashes only)": {
+      "crash_points_total": 138,
+      "f1": 0.0,
+      "false_alarms": [],
+      "fn": 2,
+      "fp": 0,
+      "missed": [
+        "stale_unfenced_worker",
+        "stale_epoch_check_only"
+      ],
+      "precision": 1.0,
+      "recall": 0.0,
+      "rows": [
+        {
+          "case": "stale_fenced_worker",
+          "crash_points": 24,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "stale_fenced_tool",
+          "crash_points": 24,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "stale_provider_dedup",
+          "crash_points": 42,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "stale_unfenced_worker",
+          "crash_points": 24,
+          "detected": false,
+          "expected": [
+            "stale_worker"
+          ],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "stale_epoch_check_only",
+          "crash_points": 24,
+          "detected": false,
+          "expected": [
+            "stale_worker"
+          ],
+          "flagged": false,
+          "kinds": []
+        }
+      ],
+      "tp": 0
+    },
+    "thorough + stale_worker": {
+      "crash_points_total": 153,
+      "f1": 1.0,
+      "false_alarms": [],
+      "fn": 0,
+      "fp": 0,
+      "missed": [],
+      "precision": 1.0,
+      "recall": 1.0,
+      "rows": [
+        {
+          "case": "stale_fenced_worker",
+          "crash_points": 27,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "stale_fenced_tool",
+          "crash_points": 27,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "stale_provider_dedup",
+          "crash_points": 45,
+          "detected": null,
+          "expected": [],
+          "flagged": false,
+          "kinds": []
+        },
+        {
+          "case": "stale_unfenced_worker",
+          "crash_points": 27,
+          "detected": true,
+          "expected": [
+            "stale_worker"
+          ],
+          "flagged": true,
+          "kinds": [
+            "stale_worker"
+          ]
+        },
+        {
+          "case": "stale_epoch_check_only",
+          "crash_points": 27,
+          "detected": true,
+          "expected": [
+            "stale_worker"
+          ],
+          "flagged": true,
+          "kinds": [
+            "stale_worker"
+          ]
+        }
+      ],
+      "tp": 2
+    }
+  },
   "strategies": {
     "0.2.0-equivalent": {
       "crash_points_total": 78,

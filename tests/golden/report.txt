@@ -1,0 +1,6 @@
+conformance: 8 crash point(s) tested, 4 finding(s)
+  [effect_replayed] crash after effect #1 (run-1): key 'c:a' issued 2 times
+  [effect_replayed] crash after effect #2 (run-2): key 'c:b' issued 2 times
+  [effect_replayed] timeout after effect #1 (run-o1): key 'c:a' issued 2 times
+  [effect_replayed] timeout after effect #2 (run-o2): key 'c:b' issued 2 times
+  minimal repro for effect_replayed: inputs=['b'] crashes=[after #1] - key 'c:b' issued 2 times

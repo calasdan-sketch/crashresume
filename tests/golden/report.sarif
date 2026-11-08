@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "runs": [
+    {
+      "results": [
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "golden.py"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "key 'c:a' issued 2 times (scenario run-1, crash after effect #1)"
+          },
+          "partialFingerprints": {
+            "scenario": "effect_replayed:run-1"
+          },
+          "ruleId": "crashresume/effect_replayed"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "golden.py"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "key 'c:b' issued 2 times (scenario run-2, crash after effect #2)"
+          },
+          "partialFingerprints": {
+            "scenario": "effect_replayed:run-2"
+          },
+          "ruleId": "crashresume/effect_replayed"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "golden.py"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "key 'c:a' issued 2 times (scenario run-o1, timeout after effect #1)"
+          },
+          "partialFingerprints": {
+            "scenario": "effect_replayed:run-o1"
+          },
+          "ruleId": "crashresume/effect_replayed"
+        },
+        {
+          "level": "error",
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "golden.py"
+                },
+                "region": {
+                  "startLine": 1
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "key 'c:b' issued 2 times (scenario run-o2, timeout after effect #2)"
+          },
+          "partialFingerprints": {
+            "scenario": "effect_replayed:run-o2"
+          },
+          "ruleId": "crashresume/effect_replayed"
+        }
+      ],
+      "tool": {
+        "driver": {
+          "informationUri": "https://github.com/calasdan-sketch/crashresume",
+          "name": "crashresume",
+          "organization": "Calas Automations Inc.",
+          "rules": [
+            {
+              "help": {
+                "text": "Before issuing an effect, look its idempotency key up in the durable record of what already happened (ctx.effects.keys() in tests; your ledger or the provider's idempotency key in production), and make that check survive a crash during recovery too."
+              },
+              "id": "crashresume/effect_replayed",
+              "name": "effect_replayed",
+              "shortDescription": {
+                "text": "A side effect with the same idempotency key ran again after a crash (double charge, duplicate email)."
+              }
+            }
+          ],
+          "version": "0.3.0"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

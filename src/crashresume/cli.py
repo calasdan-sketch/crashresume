@@ -7,7 +7,7 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-from . import __version__
+from . import __author__, __version__
 from .core import Context, clean, conform, explain
 
 
@@ -123,7 +123,11 @@ class OneShotRecoveryAgent:
 
 
 def _write(path: str, text: str) -> None:
-    """Write a report file; a crash halfway never leaves a half-written file behind."""
+    """Write a report file ('-' = standard output); a crash halfway never leaves a half-written file behind."""
+    if path == "-":
+        sys.stdout.write(text)
+        sys.stdout.flush()
+        return
     tmp = f"{path}.{os.getpid()}.tmp"
     try:
         with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
@@ -177,17 +181,22 @@ def _run_target(args: argparse.Namespace) -> int:
             from .process import conform_process
             ignored = [f for f, on in (("--minimize", args.minimize), ("--fail-fast", args.fail_fast),
                                        ("--torn-writes", args.torn_writes), ("--strict-dirs", args.strict_dirs),
-                                       ("--explain", args.explain), ("--check-determinism", args.check_determinism)) if on]
+                                       ("--explain", args.explain), ("--check-determinism", args.check_determinism),
+                                       ("--faults", args.faults), ("--stale-worker", args.stale_worker)) if on]
             if ignored:
                 print(f"crashresume: warning: {', '.join(ignored)} not supported with --process; ignored", file=sys.stderr)
-            report = conform_process(args.target, inputs, timeout=args.timeout, sample=args.sample, **opts)
+            report = conform_process(args.target, inputs, timeout=args.timeout, sample=args.sample,
+                                     workers=args.workers, **opts)
         else:
             from ._child import _load
+            if args.workers != 1:
+                print("crashresume: warning: --workers only applies with --process; ignored", file=sys.stderr)
             sys.path.insert(0, os.getcwd())
             factory = _load(args.target)
             report = conform(factory, inputs, torn_writes=args.torn_writes, minimize=args.minimize,
                              fail_fast=args.fail_fast, strict_dirs=args.strict_dirs, sample=args.sample,
-                             check_determinism=args.check_determinism, **opts)
+                             check_determinism=args.check_determinism, faults=args.faults,
+                             stale_worker=args.stale_worker, **opts)
     except KeyboardInterrupt:
         print("crashresume: interrupted", file=sys.stderr)
         return 130
@@ -197,7 +206,13 @@ def _run_target(args: argparse.Namespace) -> int:
         return 2
     except Exception as exc:  # noqa: BLE001 - bad setup must not look like a pass
         return _setup_error(exc)
-    print(report)
+    to_stdout = [n for n, v in (("--json", args.json), ("--junit", args.junit), ("--sarif", args.sarif)) if v == "-"]
+    if len(to_stdout) > 1:
+        print(f"crashresume: cannot run: only one of {', '.join(to_stdout)} can write to '-' (standard output)",
+              file=sys.stderr)
+        return 2
+    human = sys.stderr if to_stdout else sys.stdout   # keep standard output clean when it carries a report
+    print(report, file=human)
     if args.explain and not args.process:
         seen: set = set()
         for f in report.findings:
@@ -205,7 +220,8 @@ def _run_target(args: argparse.Namespace) -> int:
                 seen.add(f.crashes)
                 try:
                     print("\n" + explain(factory, inputs, f.crashes, strict_keyless=args.strict_keyless or args.thorough,
-                                         strict_dirs=args.strict_dirs, check_payloads=True if args.check_payloads else None))
+                                         strict_dirs=args.strict_dirs,
+                                         check_payloads=True if args.check_payloads else None), file=human)
                 except Exception as exc:  # noqa: BLE001 - explanation is best effort
                     print(f"crashresume: could not explain {f.scenario}: {type(exc).__name__}: {clean(str(exc))}",
                           file=sys.stderr)
@@ -250,7 +266,7 @@ def _safe_streams() -> None:
 def main(argv: Optional[List[str]] = None) -> int:
     _safe_streams()
     ap = argparse.ArgumentParser(prog="crashresume", description=__doc__.splitlines()[0])
-    ap.add_argument("--version", action="version", version=f"crashresume {__version__}")
+    ap.add_argument("--version", action="version", version=f"crashresume {__version__} (c) {__author__}")
     ap.add_argument("--selftest", action="store_true", help="run the built-in good/bad agent demo")
     ap.add_argument("target", nargs="?", help="agent factory as 'package.module:factory' or 'path/to/file.py:factory'")
     ap.add_argument("--inputs", help="JSON list of inputs fed to step(), e.g. '[\"a\",\"b\"]'")
@@ -266,14 +282,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--strict-dirs", action="store_true", help="file names are lost until ctx.fs.fsync_dir() (stricter fs model)")
     ap.add_argument("--sample", type=int, metavar="N", help="test only N evenly spaced crash points per kind/level")
     ap.add_argument("--check-determinism", action="store_true", help="run the crash-free baseline twice and warn if it differs")
+    ap.add_argument("--faults", action="store_true",
+                    help="also inject a timeout after the effect committed, and a refusal before it ran, at every effect")
+    ap.add_argument("--stale-worker", action="store_true",
+                    help="also wake a paused first worker after its replacement finished (needs fencing tokens)")
     ap.add_argument("--explain", action="store_true", help="print a step-by-step timeline for the first failing scenarios")
     ap.add_argument("--allow-vacuous", action="store_true", help="exit 0 even when no crash scenario ran")
     ap.add_argument("--fail-fast", action="store_true", help="stop at the first finding")
     ap.add_argument("--process", action="store_true", help="really SIGKILL a fresh subprocess per life (inputs must be JSON)")
     ap.add_argument("--timeout", type=float, default=30.0, help="per-process timeout in seconds (--process)")
-    ap.add_argument("--json", metavar="PATH", help="write the report as JSON")
-    ap.add_argument("--junit", metavar="PATH", help="write a JUnit XML report")
-    ap.add_argument("--sarif", metavar="PATH", help="write a SARIF 2.1.0 report")
+    ap.add_argument("--workers", type=int, default=1, metavar="N", help="run N scenarios at once (--process only)")
+    ap.add_argument("--json", metavar="PATH",
+                    help="write the report as JSON ('-' = standard output, text report to standard error)")
+    ap.add_argument("--junit", metavar="PATH", help="write a JUnit XML report ('-' = standard output)")
+    ap.add_argument("--sarif", metavar="PATH", help="write a SARIF 2.1.0 report ('-' = standard output)")
     ap.add_argument("--sarif-uri", help="file shown in SARIF locations (default: the target module)")
     args = ap.parse_args(argv)
     if args.target:

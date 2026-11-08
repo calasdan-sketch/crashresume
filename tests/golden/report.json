@@ -1,0 +1,88 @@
+{
+  "crash_points": 8,
+  "findings": [
+    {
+      "crash_after": 1,
+      "crashes": [
+        [
+          1,
+          "after"
+        ]
+      ],
+      "detail": "key 'c:a' issued 2 times",
+      "kind": "effect_replayed",
+      "point": "effect",
+      "scenario": "run-1",
+      "when": "after"
+    },
+    {
+      "crash_after": 2,
+      "crashes": [
+        [
+          2,
+          "after"
+        ]
+      ],
+      "detail": "key 'c:b' issued 2 times",
+      "kind": "effect_replayed",
+      "point": "effect",
+      "scenario": "run-2",
+      "when": "after"
+    },
+    {
+      "crash_after": 1,
+      "crashes": [
+        [
+          1,
+          "timeout"
+        ]
+      ],
+      "detail": "key 'c:a' issued 2 times",
+      "kind": "effect_replayed",
+      "point": "effect",
+      "scenario": "run-o1",
+      "when": "timeout"
+    },
+    {
+      "crash_after": 2,
+      "crashes": [
+        [
+          2,
+          "timeout"
+        ]
+      ],
+      "detail": "key 'c:b' issued 2 times",
+      "kind": "effect_replayed",
+      "point": "effect",
+      "scenario": "run-o2",
+      "when": "timeout"
+    }
+  ],
+  "passed": false,
+  "repros": [
+    {
+      "crashes": [
+        [
+          1,
+          "after"
+        ]
+      ],
+      "detail": "key 'c:b' issued 2 times",
+      "inputs": [
+        "'b'"
+      ],
+      "kind": "effect_replayed"
+    }
+  ],
+  "scenarios": [
+    "run-1",
+    "run-2",
+    "run-b1",
+    "run-b2",
+    "run-o1",
+    "run-o2",
+    "run-r1",
+    "run-r2"
+  ],
+  "warnings": []
+}

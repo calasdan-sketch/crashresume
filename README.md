@@ -1,6 +1,6 @@
 # crashresume
 
-**Prove your agent survives a crash - in a unit test, with zero dependencies.** `crashresume` kills and restarts your agent at every side-effect and file-I/O boundary (after the effect commits, before it commits, mid-write with a torn file, and again during recovery - in simulation or with a real `SIGKILL`), then tells you exactly which crash point double-charged, lost work, or resumed into the wrong state, and shrinks it to a minimal reproduction.
+**Prove your agent survives a crash - in a unit test, with zero dependencies.** `crashresume` kills and restarts your agent at every side-effect and file-I/O boundary (after the effect commits, before it commits, mid-write with a torn file, and again during recovery - in simulation or with a real `SIGKILL`), then tells you exactly which crash point double-charged, lost work, or resumed into the wrong state, and shrinks it to a minimal reproduction. Opt-in: a timeout that arrives after the effect already happened, and a paused "zombie" worker that wakes up after its replacement finished.
 
 No server, no database, no framework: the subject is any object with a `step(input)` method. Pure Python 3.9+, no runtime dependencies (pytest only if you use the fixture).
 
@@ -61,6 +61,7 @@ conformance: 6 crash point(s) tested, 3 finding(s)
 | `subject_error` | the subject raised an ordinary exception after a crash (reported, not raised) |
 | `crash_swallowed` | the subject caught the injected crash (`except BaseException`) and kept going, even if it died again later |
 | `subject_hang` | process mode only: a child exceeded its timeout and was killed |
+| `stale_worker` | `stale_worker=True` only: a paused worker woke up after its replacement had finished and wrote again (no fencing token) |
 
 Each finding kind has a one-line fix hint in the SARIF output (`help` text of the rule). `str(report)` and the CLI list at most 100 findings and say how many more there are; `report.findings`, `--json`, `--sarif` and `--junit` always hold all of them.
 
@@ -82,6 +83,32 @@ A run that tested nothing (no effects recorded, or no inputs) still returns `pas
 | `max_scenarios=10_000` | safety cap on scenarios run (breadth-first) | keeps `max_crashes>=3` bounded |
 
 Scenarios are named by `ctx.run_id`: baseline `run`, `run-3` (after crash point 3), `run-b3` (before point 3), `run-t3` (torn write at point 3), `run-3-1` (after 3, then after the resume's first point). A crash point is every `ctx.effect` / `ctx.tool` call and every mutating `ctx.fs` call.
+
+## Failures that are not crashes: timeouts, refusals, full disks, stale workers
+
+Real systems fail in ways a kill-and-restart test never shows. These are opt-in (`faults=True`, `stale_worker=True`, or `--faults`, `--stale-worker`) and are not part of `thorough`.
+
+**Timeouts, refusals and full disks (`faults=True`).** At every `ctx.effect` / `ctx.tool` call the harness runs the scenario twice more: once where the effect *commits* but the caller gets `InjectedTimeout` (the acknowledgement was lost - the classic cause of a double charge after a "retry"), and once where the effect *does not run* and the caller gets `InjectedRefusal`. At every `ctx.fs.write` it runs one more where half the data is stored and the write then fails with `OSError(ENOSPC)` (a retry that appends after the half line welds the two together). All are ordinary `OSError`s, so `except OSError` / `except Exception` in your code catches them. An error that escapes `step()` counts as the process exiting (files already written stay; there is no power cut), followed by a restart; an error the subject handles is judged on the finished run.
+
+```python
+def charge(self, job):
+    for _ in range(3):
+        if f"charge:{job}" in self.ctx.effects.keys():   # did the earlier try go through after all?
+            return
+        try:
+            self.ctx.effect("charge", job, key=f"charge:{job}")
+            return
+        except OSError:
+            continue                                      # without the check above this is a double charge
+```
+
+**Stale workers (`stale_worker=True`).** The first worker pauses just before effect *k* (a long GC pause, a lost lease, a frozen VM). A replacement worker starts, runs every input to the end, and only then does the first one wake up and carry on with whatever it had already decided. Both see the same durable `ctx.store` / `ctx.fs`. A check made before the call is not enough (the pause can fall between the check and the call); the resource must reject old writers. In this harness that is a fencing token: `ctx.effect(..., fence=ctx.generation)` (also `ctx.tool(..., fence=...)`). `ctx.generation` is 1 for the first worker and grows with every restart; an effect carrying a token older than the newest one seen raises `FencedOut` and is not recorded. Without a token the second write is reported as `stale_worker`. The other safe design is a resource that honours the idempotency key itself (a payment provider given an idempotency key): say so with `ctx.effect(..., key=..., dedupe=True)` (or `ctx.tool(..., dedupe=True)`), and a second effect with a key the resource already has is ignored - nothing is recorded, nothing is counted as a replay - in every mode, not just here. Claim `dedupe=True` only for a resource that really does it; the harness cannot check, and it removes the replay check for that call. In process mode a deduplicated `ctx.tool` call returns `None` for a key first used in an earlier process life.
+
+```python
+self.ctx.effect("charge", job, key=f"charge:{job}", fence=self.ctx.generation)   # stale writer is rejected
+```
+
+Costs one extra scenario per effect (per `fs.write` for a full disk) for each option. Process mode ignores both (it prints a warning).
 
 ## Files: fsync, rename, torn writes
 
@@ -138,7 +165,10 @@ Any framework fits if you route its tools through `ctx.tool(fn, key=...)` (sync 
 crashresume myagent.agent:make_agent --inputs '["a","b","c"]' --thorough --minimize \
     --junit crashresume-junit.xml --sarif crashresume.sarif     # exit 0 pass, 1 findings, 2 bad setup or unwritable report file
 crashresume myagent.agent:make_agent --inputs '["a","b"]' --process   # real SIGKILLs
+crashresume myagent.agent:make_agent --inputs '["a","b"]' --faults --stale-worker   # timeouts, refusals, zombie worker
 ```
+
+`--json -`, `--junit -` or `--sarif -` writes that report to standard output (the text report then goes to standard error). `--workers N` (with `--process`) runs N scenarios at once; the report is identical to a single worker, and only the wall-clock time changes (not measured in the environment this was built in, which gave about one usable core).
 
 Reports are deterministic (no timestamps), so CI diffs stay quiet. `action.yml` is a composite GitHub Action (`uses: calasdan-sketch/crashresume@<ref>` with `target:` and `inputs:`); upload the SARIF with `github/codeql-action/upload-sarif`. Untrusted characters (terminal escapes, bidi and zero-width marks) in payloads, keys and exception text are escaped in every output. Setup mistakes (bad JSON, unknown module, unwritable report path, an agent that calls `sys.exit`) print one plain line on stderr and exit 2, never a traceback; a console that cannot show a character (Windows cp1252, `LANG=C`) gets an escape instead of an error; report files are written to a temp file and renamed, so CI never sees a half-written report.
 
@@ -170,7 +200,7 @@ Route real side effects through `ctx.effect(kind, payload, key=...)` (keys must 
 
 ## How it compares
 
-Durable-execution runtimes test *their own* recovery; `crashresume` tests *your* agent's. Statements below come from each project's own pages or from running the package (package metadata and source of durabl 0.1.0 and ordeal 0.3.43 re-read 2026-11-07, and crashresume installed and run on Linux/Python 3.13; Temporal and agent-effects rows were not run - docs only; ordeal and durabl were downloaded and read but not run).
+Durable-execution runtimes test *their own* recovery; `crashresume` tests *your* agent's. Statements below come from each project's own pages or from running the package (package metadata and source of durabl 0.1.0 and ordeal 0.3.43 re-read 2026-11-08, still the newest versions, and crashresume installed and run on Linux/Python 3.13; Temporal and agent-effects rows were not run - docs only; ordeal and durabl were downloaded and read but not run).
 
 | | crashresume | [durabl](https://pypi.org/project/durabl/) | [Temporal replay testing](https://keithtenzer.com/temporal/Altering_Space-Time_Continuum_Testing_for_Determinism/) | [ordeal](https://pypi.org/project/ordeal/0.3.43/) | [agent-effects (Rust)](https://docs.rs/crate/agent-effects/latest/source/tests/crash.rs) |
 |---|---|---|---|---|---|
@@ -183,6 +213,7 @@ Durable-execution runtimes test *their own* recovery; `crashresume` tests *your*
 | Torn writes / fsync model | yes (`ctx.fs`, incl. directory fsync with `strict_dirs`) | no | no | disk-full and truncated-output faults; no fsync model found in its source | no |
 | Real `SIGKILL` of your code | yes (`conform_process`) | no | no | kills Compose services, not your function | n/a |
 | Minimal repro, JUnit/SARIF | yes | no | no | own JSON schema | no |
+| Timeout after the effect committed; stale writer with fencing tokens | yes (`faults=True`, `stale_worker=True`, `fence=`) | no | no | `timeout()` raises instead of calling the target (source read); `stale_state` patches an attribute; no fencing found | not described |
 
 Why it matters: crashes between a side effect and its record repeat the effect - one write-up reproduced a duplicate charge in 3 of 3 trials on Restate ([source](https://nerdleveltech.com/restate-durable-agent-duplicate-tool-calls-tested)), and LangGraph re-runs an interrupted node from the top, so tools that already ran fire again ([source](https://blog.raed.dev/posts/langgraph-hitl)). `crashresume` lets you catch that class of bug in a unit test.
 
@@ -199,6 +230,10 @@ Why it matters: crashes between a side effect and its record repeat the effect -
 
 Directory durability, on a separate 4-agent corpus (2 correct; 2 broken because a new name is never made durable): `thorough=True` alone finds 0 of 2 (it assumes names are durable), `thorough=True, strict_dirs=True` finds 2 of 2 with 0 false alarms (2,232 vs 1,992 crash points). It is a separate corpus so the 24-agent numbers stay comparable with 0.2.0/0.3.0.
 
+Failure-injection corpora (separate, so the numbers above stay comparable): 7 agents for `faults=True` (4 broken: a retry that does not ask whether the first try went through, a retry under a fresh key, an ignored error followed by "done", a journal retried after a half-written line) and 5 for `stale_worker=True` (2 broken: no fencing token; an epoch check made before the call). Without the new options `thorough=True` finds 0 of 4 and 0 of 2; with them it finds 4 of 4 and 2 of 2, and flags none of the 6 correct agents. The same caveat applies: written together with the tool, and while writing it the harness caught a flaw in one of my own "correct" stale-worker agents (a checkpoint that appended instead of setting).
+
+`python benchmarks/mutants.py` breaks the library on purpose in 29 ways and checks the fast tests notice; the result is in [`benchmarks/MUTANTS.md`](benchmarks/MUTANTS.md).
+
 Process mode on three agents that keep state in process memory (the simulator keeps it too, so default simulation passes them): `conform_process` flags both broken ones (`effect_replayed`) and passes the correct one; see `RESULTS.md`.
 
 Caveats: the corpus was written together with the tool, so 1.00 is a regression guard, not a field accuracy claim. Building it was still informative: crashresume found a real bug in one of my own "correct" agents (a journal that appended after a torn tail without repairing it), which is now fixed in the corpus. The random-kill row is my own implementation of the chaos-monkey idea, not a third-party tool. Thorough mode costs about 32x the default's scenarios.
@@ -211,6 +246,7 @@ Caveats: the corpus was written together with the tool, so 1.00 is a regression 
 - **Only what goes through `ctx.effect` is observed.** Subjects that record no effects pass trivially (with a warning). Effects without `key=` cannot be checked for replay (warning only).
 - **Deterministic subjects work best.** Crash points come from the baseline run; a subject that issues different effects each run gets "never reached" warnings.
 - **Directory model.** `strict_dirs` is one specific stricter rule (names durable per directory on `fsync_dir`); it does not model every reordering a real file system may do, and a cross-directory rename that survives only half can leave the file under both names (the model keeps both). Process mode cannot lose names or data (SIGKILL keeps the page cache), so `strict_dirs` is simulation-only and the CLI says so.
+- **Faults and stale workers are two specific models.** `faults=True` fails one call at a time, at `ctx.effect` / `ctx.tool` (timeout, refusal) and `ctx.fs.write` (full disk, half written; other file operations never fail); it does not model slow calls, partial responses, clock jumps or a disk that fills up later. `stale_worker=True` tests one interleaving - the first worker wakes after its replacement has finished - not every interleaving of two live workers; it runs the first worker on a thread, shares `ctx.store` as one live dict (a database, not a snapshot), and treats any exception the woken worker dies of as "stopped". Neither runs in process mode.
 - **Threads.** Crash points must be hit on the thread that runs `step()`; an exception on a worker thread cannot stop the process, and is reported as `crash_swallowed` with a hint.
 - **Inputs are deep-copied per process life.** Inputs that depend on object identity (a shared client, a mock you assert on) should be built inside the factory instead.
 - **`sample=N` is a subset, not a proof.** It exists for inputs with hundreds of steps, where every scenario replays every input (cost is roughly quadratic).
@@ -220,4 +256,4 @@ Caveats: the corpus was written together with the tool, so 1.00 is a regression 
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. Copyright (c) 2026 Calas Automations Inc. See `LICENSE`.

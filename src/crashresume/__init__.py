@@ -5,8 +5,11 @@ from .core import (
     Context,
     Effect,
     EffectLog,
+    FencedOut,
     Finding,
     InjectedCrash,
+    InjectedRefusal,
+    InjectedTimeout,
     KeyView,
     Repro,
     conform,
@@ -17,6 +20,7 @@ from .fs import RealFS, SimFS
 from .process import SetupError, conform_process
 
 __version__ = "0.3.0"
+__author__ = "Calas Automations Inc."
 __all__ = [
     "conform",
     "conform_process",
@@ -28,10 +32,14 @@ __all__ = [
     "EffectLog",
     "Finding",
     "InjectedCrash",
+    "InjectedTimeout",
+    "InjectedRefusal",
+    "FencedOut",
     "ConformanceReport",
     "Repro",
     "SimFS",
     "RealFS",
     "SetupError",
     "__version__",
+    "__author__",
 ]

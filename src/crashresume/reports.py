@@ -10,7 +10,7 @@ import re
 from typing import Any, Dict, List
 from xml.etree import ElementTree as ET
 
-from .core import ConformanceReport, clean
+from .core import ConformanceReport, clean, where
 
 _XML_BAD = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f￾￿]")
 
@@ -24,6 +24,7 @@ RULES: Dict[str, str] = {
     "subject_error": "The subject raised an ordinary exception after a crash (often a torn or missing checkpoint).",
     "crash_swallowed": "The subject caught the injected crash and kept running; a real crash cannot be caught.",
     "subject_hang": "A child process exceeded its timeout (process mode).",
+    "stale_worker": "A worker that was paused woke up after its replacement had finished and wrote again (no fencing).",
 }
 
 
@@ -41,6 +42,8 @@ FIXES: Dict[str, str] = {
     "subject_error": "Validate checkpoints on load (torn or missing file, partial journal line) and recover instead of raising.",
     "crash_swallowed": "Do not catch BaseException around code that performs effects; a real crash cannot be caught.",
     "subject_hang": "Recovery waited on something a dead process still holds (a lock file, a lease): add expiry or owner checks.",
+    "stale_worker": "Pass a fencing token with every effect (ctx.effect(..., fence=ctx.generation)) and make the resource "
+                    "reject tokens older than the newest it has seen; a check done just before the call is not enough.",
 }
 
 
@@ -49,6 +52,7 @@ def _x(text: str) -> str:
 
 
 def to_junit(report: ConformanceReport, name: str = "crashresume") -> str:
+    from . import __author__, __version__
     by_scenario: Dict[str, List[Any]] = {}
     for f in report.findings:
         by_scenario.setdefault(f.scenario, []).append(f)
@@ -56,6 +60,7 @@ def to_junit(report: ConformanceReport, name: str = "crashresume") -> str:
     suite = ET.Element("testsuite", name=_x(name), tests=str(len(scenarios)),
                        failures=str(len(by_scenario)), errors="0", skipped="0")
     props = ET.SubElement(suite, "properties")
+    ET.SubElement(props, "property", name="tool", value=f"crashresume {__version__} by {__author__}")
     for w in report.warnings:
         ET.SubElement(props, "property", name="warning", value=_x(w))
     for sid in scenarios:
@@ -69,7 +74,7 @@ def to_junit(report: ConformanceReport, name: str = "crashresume") -> str:
 
 
 def to_sarif(report: ConformanceReport, artifact_uri: str = "crashresume") -> str:
-    from . import __version__
+    from . import __author__, __version__
     kinds = sorted({f.kind for f in report.findings})
     rules = [{"id": f"crashresume/{k}", "name": k, "shortDescription": {"text": RULES.get(k, k)},
               "help": {"text": FIXES.get(k, RULES.get(k, k))}} for k in kinds]
@@ -78,7 +83,7 @@ def to_sarif(report: ConformanceReport, artifact_uri: str = "crashresume") -> st
         results.append({
             "ruleId": f"crashresume/{f.kind}",
             "level": "error",
-            "message": {"text": _x(f"{f.detail} (scenario {f.scenario}, crash {f.when} point #{f.crash_after})")},
+            "message": {"text": _x(f"{f.detail} (scenario {f.scenario}, {where(f.when, f.point, f.crash_after)})")},
             "locations": [{"physicalLocation": {"artifactLocation": {"uri": artifact_uri}, "region": {"startLine": 1}}}],
             "partialFingerprints": {"scenario": _x(f"{f.kind}:{f.scenario}")},
         })
@@ -86,7 +91,7 @@ def to_sarif(report: ConformanceReport, artifact_uri: str = "crashresume") -> st
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
         "version": "2.1.0",
         "runs": [{
-            "tool": {"driver": {"name": "crashresume", "version": __version__,
+            "tool": {"driver": {"name": "crashresume", "version": __version__, "organization": __author__,
                                 "informationUri": "https://github.com/calasdan-sketch/crashresume", "rules": rules}},
             "results": results,
         }],

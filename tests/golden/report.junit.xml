@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="golden" tests="8" failures="4" errors="0" skipped="0">
+  <properties>
+    <property name="tool" value="crashresume 0.3.0 by Calas Automations Inc." />
+  </properties>
+  <testcase classname="golden" name="run-1" time="0">
+    <failure type="effect_replayed" message="effect_replayed: key 'c:a' issued 2 times">[effect_replayed] key 'c:a' issued 2 times</failure>
+  </testcase>
+  <testcase classname="golden" name="run-2" time="0">
+    <failure type="effect_replayed" message="effect_replayed: key 'c:b' issued 2 times">[effect_replayed] key 'c:b' issued 2 times</failure>
+  </testcase>
+  <testcase classname="golden" name="run-b1" time="0" />
+  <testcase classname="golden" name="run-b2" time="0" />
+  <testcase classname="golden" name="run-o1" time="0">
+    <failure type="effect_replayed" message="effect_replayed: key 'c:a' issued 2 times">[effect_replayed] key 'c:a' issued 2 times</failure>
+  </testcase>
+  <testcase classname="golden" name="run-o2" time="0">
+    <failure type="effect_replayed" message="effect_replayed: key 'c:b' issued 2 times">[effect_replayed] key 'c:b' issued 2 times</failure>
+  </testcase>
+  <testcase classname="golden" name="run-r1" time="0" />
+  <testcase classname="golden" name="run-r2" time="0" />
+</testsuite>
