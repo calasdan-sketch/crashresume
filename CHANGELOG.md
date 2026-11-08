@@ -19,7 +19,7 @@ Added
 
 Fixed
 - `RealFS.rename` into a directory that did not exist yet failed (`SimFS` and the docs say directories are implicit); `RealFS.fsync_dir` on a directory nothing was written to failed where `SimFS` accepted it. Found by the differential test.
-- 11 internal type errors fixed; `mypy src` is clean and runs in CI (Python 3.12).
+- 10 internal type errors fixed; `mypy src` is clean and runs in CI (Python 3.12).
 
 Round 4 (the stranger's first hour: clean-venv install of the built wheel, packaging, hostile input, consoles, Windows review)
 

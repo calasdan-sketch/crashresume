@@ -108,7 +108,7 @@ def charge(self, job):
 self.ctx.effect("charge", job, key=f"charge:{job}", fence=self.ctx.generation)   # stale writer is rejected
 ```
 
-Costs one extra scenario per effect (per `fs.write` for a full disk) for each option. Process mode ignores both (it prints a warning).
+Cost: `faults=True` adds two scenarios per effect (timeout, refusal) and one per `ctx.fs.write` (full disk); `stale_worker=True` adds one per effect. Process mode ignores both (it prints a warning).
 
 ## Files: fsync, rename, torn writes
 
